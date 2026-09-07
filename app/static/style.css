@@ -51,7 +51,7 @@ h1, h2 { font-weight: 600; margin: 0 0 0.5rem; }
 [hidden] { display: none !important; }
 .narrow { max-width: 36rem; }
 label { display: flex; flex-direction: column; gap: 0.3rem; }
-input[type="text"], input[type="file"], select {
+input[type="text"], input[type="file"], input[type="number"], select {
   padding: 0.45rem 0.5rem;
   border: 1px solid var(--line);
   border-radius: 4px;

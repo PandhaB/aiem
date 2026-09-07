@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from core.coco import load_coco
+from engine.catalog import describe_device
 
 router = APIRouter()
 templates = Jinja2Templates(
@@ -18,7 +19,7 @@ def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"projects": projects},
+        {"projects": projects, "device": describe_device()},
     )
 
 
@@ -38,6 +39,7 @@ def project_page(request: Request, project_id: str):
             "annotation_count": len(coco["annotations"]),
             "checkpoints": request.app.state.store.list_checkpoints(project_id),
             "runs": request.app.state.store.list_runs(project_id),
+            "device": describe_device(),
         },
     )
 
@@ -64,7 +66,7 @@ def train_page(request: Request, project_id: str):
     return templates.TemplateResponse(
         request,
         "train.html",
-        {"project": record},
+        {"project": record, "device": describe_device()},
     )
 
 
@@ -80,5 +82,6 @@ def infer_page(request: Request, project_id: str):
         {
             "project": record,
             "checkpoints": request.app.state.store.list_checkpoints(project_id),
+            "device": describe_device(),
         },
     )

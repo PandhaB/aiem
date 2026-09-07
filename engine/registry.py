@@ -1,30 +1,39 @@
 from __future__ import annotations
 
-from engine.detectron2 import Detectron2Engine
+from engine.catalog import DEFAULT_ENGINE, detectron2_installed, list_models
 from engine.protocol import SegmentationEngine
 from engine.stub import StubEngine
 
-_BACKENDS: dict[str, type] = {
-    "stub": StubEngine,
-    "detectron2": Detectron2Engine,
-}
-
 
 def available_engines() -> list[dict[str, object]]:
+    d2 = detectron2_installed()
     return [
-        {"name": "stub", "available": True, "label": "Stub (fake engine for scaffolding)"},
+        {
+            "name": "stub",
+            "available": True,
+            "label": "Stub (fake engine, no GPU)",
+        },
         {
             "name": "detectron2",
-            "available": False,
-            "label": "Detectron2 (not implemented yet)",
+            "available": d2,
+            "label": "Detectron2 (Mask R-CNN)" + ("" if d2 else " — not installed here"),
         },
     ]
 
 
+def available_models() -> list[dict[str, str]]:
+    return [
+        {"id": spec.id, "label": spec.label, "engine": spec.engine}
+        for spec in list_models()
+    ]
+
+
 def get_engine(name: str) -> SegmentationEngine:
-    try:
-        backend_cls = _BACKENDS[name]
-    except KeyError as exc:
-        known = ", ".join(sorted(_BACKENDS))
-        raise KeyError(f"Unknown engine {name!r}. Known engines: {known}.") from exc
-    return backend_cls()
+    key = (name or DEFAULT_ENGINE).strip()
+    if key == "stub":
+        return StubEngine()
+    if key == "detectron2":
+        from engine.detectron2 import Detectron2Engine
+
+        return Detectron2Engine()
+    raise KeyError(f"Unknown engine {key!r}. Known engines: detectron2, stub.")

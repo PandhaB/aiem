@@ -129,3 +129,21 @@ def test_delete_project_via_api(client: TestClient) -> None:
     assert deleted.status_code == 200
     missing = client.get(f"/api/projects/{project_id}")
     assert missing.status_code == 404
+
+
+def test_engines_models_and_status(client: TestClient) -> None:
+    engines = client.get("/api/engines")
+    assert engines.status_code == 200
+    names = {item["name"] for item in engines.json()["engines"]}
+    assert names == {"stub", "detectron2"}
+    models = client.get("/api/models")
+    assert models.status_code == 200
+    payload = models.json()
+    assert payload["default"] == "mask_rcnn_r50_fpn"
+    assert payload["models"][0]["id"] == "mask_rcnn_r50_fpn"
+    status = client.get("/api/status")
+    assert status.status_code == 200
+    body = status.json()
+    assert "cuda" in body
+    assert "device" in body
+    assert body["gpu_recommended"] is True

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.projects import ProjectStore
+from engine.catalog import DEFAULT_MODEL, ensure_pretrained, reject_incompatible_checkpoint
 from engine.registry import get_engine
 from engine.types import InferRequest, TrainRequest
 
@@ -135,7 +136,13 @@ class JobRunner:
             on_progress(0.01, "Starting training")
             engine = get_engine(record.engine)
             pretrained = None
-            if init == "pretrained":
+            if init == "pretrained" and record.engine == "detectron2":
+                pretrained = ensure_pretrained(
+                    self.shared_weights_dir,
+                    record.model,
+                    on_progress=on_progress,
+                )
+            elif init == "pretrained":
                 pretrained = self._optional_shared_weights()
             result = engine.train(
                 TrainRequest(
@@ -146,6 +153,7 @@ class JobRunner:
                     output_dir=run_dir / "output",
                     pretrained_weights_path=pretrained,
                     max_iter=max_iter,
+                    model=record.model or DEFAULT_MODEL,
                 ),
                 on_progress=on_progress,
             )
@@ -190,7 +198,8 @@ class JobRunner:
         try:
             on_progress(0.01, "Starting inference")
             engine = get_engine(record.engine)
-            checkpoint = self._resolve_checkpoint(record.weights_dir, checkpoint_name)
+            checkpoint = self._resolve_checkpoint(record.weights_dir, checkpoint_name, record.engine)
+            reject_incompatible_checkpoint(checkpoint, record.engine)
             result = engine.infer(
                 InferRequest(
                     images_dir=record.images_dir,
@@ -198,6 +207,7 @@ class JobRunner:
                     class_names=[item.name for item in record.classes],
                     overlay_colors=overlay_colors,
                     output_dir=run_dir / "output",
+                    model=record.model or DEFAULT_MODEL,
                 ),
                 on_progress=on_progress,
             )
@@ -220,7 +230,12 @@ class JobRunner:
             current["finished_at"] = _now()
             self._write_status(run_dir, current)
 
-    def _resolve_checkpoint(self, weights_dir: Path, checkpoint_name: str | None) -> Path:
+    def _resolve_checkpoint(
+        self,
+        weights_dir: Path,
+        checkpoint_name: str | None,
+        engine_name: str,
+    ) -> Path:
         if checkpoint_name:
             path = (weights_dir / Path(checkpoint_name).name).resolve()
             if not str(path).startswith(str(weights_dir.resolve())):
@@ -229,6 +244,10 @@ class JobRunner:
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_name}")
             return path
         files = sorted(path for path in weights_dir.iterdir() if path.is_file())
+        if engine_name == "detectron2":
+            files = [path for path in files if path.suffix.lower() in {".pth", ".pkl"}]
+        elif engine_name == "stub":
+            files = [path for path in files if path.suffix.lower() == ".json"]
         if not files:
             raise FileNotFoundError("No checkpoint in the project weights folder. Train first.")
         return files[-1]

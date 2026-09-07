@@ -1,15 +1,7 @@
-# Local v1: one service (web UI + API + jobs).
-# Model weight files stay on the host via the weights/ and projects/ volumes.
-# They are never copied into the image.
-#
-# GPU (later, when a real training backend is wired):
-#   deploy:
-#     resources:
-#       reservations:
-#         devices:
-#           - driver: nvidia
-#             count: all
-#             capabilities: [gpu]
+# One service: web UI + Detectron2 jobs.
+# Weight files stay on the host (weights/, projects/*/weights/). They are never baked into the image.
+# GPU: NVIDIA Container Toolkit on the host. If `up` fails with a nvidia device-driver error,
+# comment out the `deploy:` block below — the app then runs on CPU (slow, a warning is shown in the UI).
 
 services:
   app:
@@ -26,7 +18,14 @@ services:
       AITEM_PROJECTS_DIR: /data/projects
       AITEM_DATASETS_DIR: /data/datasets
       AITEM_WEIGHTS_DIR: /data/weights
-      # Host user so files in projects/ and weights/ are yours to edit or delete.
-      # UID is a reserved bash variable — use HOST_UID, not UID.
       HOST_UID: "${HOST_UID:-1000}"
       HOST_GID: "${HOST_GID:-1000}"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

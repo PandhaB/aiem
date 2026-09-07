@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 
 from core.coco import load_coco
 from core.jobs import JobError
-from engine.registry import available_engines
+from engine.catalog import DEFAULT_ENGINE, DEFAULT_MODEL, describe_device, get_model
+from engine.registry import available_engines, available_models
 
 router = APIRouter(prefix="/api")
 
@@ -18,7 +19,8 @@ router = APIRouter(prefix="/api")
 class CreateProjectBody(BaseModel):
     name: str
     classes: list[str] = Field(min_length=1)
-    engine: str = "stub"
+    engine: str = DEFAULT_ENGINE
+    model: str = DEFAULT_MODEL
 
 
 class SaveAnnotationsBody(BaseModel):
@@ -70,6 +72,16 @@ def list_engines() -> dict:
     return {"engines": available_engines()}
 
 
+@router.get("/models")
+def list_models() -> dict:
+    return {"models": available_models(), "default": DEFAULT_MODEL}
+
+
+@router.get("/status")
+def runtime_status() -> dict:
+    return describe_device()
+
+
 @router.get("/projects")
 def list_projects(request: Request) -> dict:
     projects = [_project_payload(request, item) for item in _store(request).list_projects()]
@@ -78,14 +90,17 @@ def list_projects(request: Request) -> dict:
 
 @router.post("/projects")
 def create_project(request: Request, body: CreateProjectBody) -> dict:
-    if body.engine != "stub":
-        raise HTTPException(
-            status_code=400,
-            detail="Only the stub engine is available in this scaffold.",
-        )
+    if body.engine not in {"stub", "detectron2"}:
+        raise HTTPException(status_code=400, detail="Unknown engine.")
     try:
-        record = _store(request).create(body.name, body.classes, engine=body.engine)
-    except ValueError as exc:
+        get_model(body.model)
+        record = _store(request).create(
+            body.name,
+            body.classes,
+            engine=body.engine,
+            model=body.model,
+        )
+    except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _project_payload(request, record)
 

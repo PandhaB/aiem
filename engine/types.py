@@ -27,6 +27,7 @@ class TrainRequest:
     output_dir: Path
     pretrained_weights_path: Path | None = None
     max_iter: int | None = None
+    model: str = "mask_rcnn_r50_fpn"
 
 
 @dataclass
@@ -42,6 +43,7 @@ class InferRequest:
     class_names: list[str]
     overlay_colors: dict[str, str]
     output_dir: Path
+    model: str = "mask_rcnn_r50_fpn"
 
 
 @dataclass

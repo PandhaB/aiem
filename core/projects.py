@@ -17,6 +17,7 @@ from core.coco import (
     replace_annotations,
     save_coco,
 )
+from engine.catalog import DEFAULT_ENGINE, DEFAULT_MODEL, get_model
 from engine.types import ClassSpec
 
 DEFAULT_COLORS = [
@@ -36,6 +37,7 @@ class ProjectRecord:
     id: str
     name: str
     engine: str
+    model: str
     classes: list[ClassSpec]
     created_at: str
     root: Path
@@ -61,6 +63,7 @@ class ProjectRecord:
             "id": self.id,
             "name": self.name,
             "engine": self.engine,
+            "model": self.model,
             "classes": [
                 {"id": item.id, "name": item.name, "color": item.color}
                 for item in self.classes
@@ -91,7 +94,8 @@ class ProjectStore:
         self,
         name: str,
         class_names: list[str],
-        engine: str = "stub",
+        engine: str = DEFAULT_ENGINE,
+        model: str = DEFAULT_MODEL,
         colors: list[str] | None = None,
     ) -> ProjectRecord:
         cleaned_name = name.strip()
@@ -102,6 +106,12 @@ class ProjectStore:
             raise ValueError("A project needs at least one class name.")
         if len(set(name.lower() for name in names)) != len(names):
             raise ValueError("Class names must be unique.")
+        engine_name = (engine or DEFAULT_ENGINE).strip()
+        if engine_name not in {"stub", "detectron2"}:
+            raise ValueError(f"Unknown engine: {engine_name}")
+        model_spec = get_model(model)
+        if engine_name == "detectron2" and model_spec.engine != "detectron2":
+            raise ValueError(f"Model {model_spec.id} does not belong to Detectron2.")
 
         project_id = self._unique_slug(cleaned_name)
         classes = [
@@ -115,7 +125,8 @@ class ProjectStore:
         record = ProjectRecord(
             id=project_id,
             name=cleaned_name,
-            engine=engine,
+            engine=engine_name,
+            model=model_spec.id,
             classes=classes,
             created_at=datetime.now(timezone.utc).isoformat(),
             root=self._project_dir(project_id),
@@ -233,7 +244,8 @@ class ProjectStore:
         return ProjectRecord(
             id=payload["id"],
             name=payload["name"],
-            engine=payload["engine"],
+            engine=payload.get("engine", DEFAULT_ENGINE),
+            model=payload.get("model", DEFAULT_MODEL),
             classes=classes,
             created_at=payload["created_at"],
             root=path,

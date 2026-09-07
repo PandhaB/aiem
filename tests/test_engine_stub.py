@@ -1,11 +1,9 @@
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
-from engine.detectron2 import Detectron2Engine
-from engine.registry import get_engine
 from engine.stub import StubEngine
+from engine.registry import get_engine
 from engine.types import InferRequest, TrainRequest
 
 
@@ -35,20 +33,6 @@ def test_registry_returns_stub() -> None:
     engine = get_engine("stub")
     assert isinstance(engine, StubEngine)
     assert engine.name() == "stub"
-
-
-def test_detectron2_is_not_implemented(tmp_path: Path) -> None:
-    engine = Detectron2Engine()
-    with pytest.raises(NotImplementedError):
-        engine.train(
-            TrainRequest(
-                images_dir=tmp_path,
-                annotations_path=tmp_path / "missing.json",
-                class_names=["Loop-A"],
-                init="random",
-                output_dir=tmp_path / "out",
-            )
-        )
 
 
 def test_stub_train_and_infer_write_artifacts(tmp_path: Path) -> None:

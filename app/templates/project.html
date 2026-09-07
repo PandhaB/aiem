@@ -5,7 +5,8 @@
 <header class="page-head">
   <div>
     <h1>{{ project.name }}</h1>
-    <p class="muted">Engine: {{ project.engine }} · {{ project.classes | map(attribute='name') | join(', ') }}</p>
+    <p class="muted">Engine: {{ project.engine }} · Model: {{ project.model }} · {{ project.classes | map(attribute='name') | join(', ') }}</p>
+    <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
   </div>
   <nav class="actions">
     <a class="button" href="/projects/{{ project.id }}/annotate">Annotate</a>

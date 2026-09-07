@@ -4,14 +4,23 @@
 <p class="crumb"><a href="/">Projects</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Train</p>
 <header class="page-head">
   <h1>Train</h1>
-  <p class="muted">This scaffold uses the stub engine. It writes a fake checkpoint so you can test the job flow. No neural network is trained.</p>
+  {% if project.engine == "stub" %}
+  <p class="muted">This project uses the stub engine. It writes a fake checkpoint so you can test the job flow. No neural network is trained.</p>
+  {% else %}
+  <p class="muted">Engine: Detectron2 · Model: {{ project.model }} (Mask R-CNN R50-FPN). Public COCO weights are downloaded into the host <code>weights/</code> folder, not into the Docker image.</p>
+  {% endif %}
+  <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
 </header>
 <section class="card stack narrow">
   <fieldset>
     <legend>Weight initialisation</legend>
-    <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights (simulated)</label>
+    <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights</label>
     <label class="choice"><input type="radio" name="init" value="random"> Random weights</label>
   </fieldset>
+  <label>Max iterations
+    <input type="number" name="max_iter" id="max-iter" min="1" step="1" value="300">
+  </label>
+  <p class="muted">Use a small number (for example 20) for a smoke check. A useful fine-tune needs more.</p>
   <button type="button" id="start-train">Start training</button>
   <div id="job-box" class="job-box" hidden>
     <p><strong id="job-status">queued</strong> — <span id="job-message"></span></p>
@@ -25,12 +34,13 @@
   const projectId = "{{ project.id }}";
   document.getElementById("start-train").addEventListener("click", async () => {
     const init = document.querySelector("input[name=init]:checked").value;
+    const maxIter = Number(document.getElementById("max-iter").value);
     const error = document.getElementById("job-error");
     error.hidden = true;
     const response = await fetch(`/api/projects/${projectId}/jobs/train`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ init }),
+      body: JSON.stringify({ init, max_iter: maxIter || null }),
     });
     const payload = await response.json();
     if (!response.ok) {

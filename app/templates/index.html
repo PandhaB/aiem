@@ -3,7 +3,8 @@
 {% block content %}
 <section class="hero">
   <h1>Projects</h1>
-  <p>Create a project, import TEM images, draw polygons, then train and run instance segmentation. The current engine is a stub (fake backend) so the full path works without a GPU.</p>
+  <p>Create a project, import TEM images, draw polygons, then train and run instance segmentation.</p>
+  <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
 </section>
 
 <section class="grid-2">
@@ -15,6 +16,12 @@
       </label>
       <label>Classes (comma-separated)
         <input type="text" name="classes" required placeholder="Loop-A, Loop-B, Loop-C">
+      </label>
+      <label>Engine
+        <select name="engine">
+          <option value="detectron2" selected>Detectron2 (Mask R-CNN R50-FPN)</option>
+          <option value="stub">Stub (fake engine, no neural net)</option>
+        </select>
       </label>
       <button type="submit">Create project</button>
       <p id="create-error" class="error" hidden></p>
@@ -47,7 +54,7 @@
     const response = await fetch("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: form.name.value, classes, engine: "stub" }),
+      body: JSON.stringify({ name: form.name.value, classes, engine: form.engine.value, model: "mask_rcnn_r50_fpn" }),
     });
     const payload = await response.json();
     if (!response.ok) {
