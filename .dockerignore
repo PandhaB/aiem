@@ -1,0 +1,14 @@
+bkp
+.git
+.cursor
+.pytest_cache
+**/__pycache__
+projects/*
+!projects/.gitkeep
+weights/*
+!weights/.gitkeep
+.venv
+venv
+.venv
+*.pyc
+Datasets

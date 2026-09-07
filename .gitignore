@@ -1,0 +1,26 @@
+# Legacy sandbox
+bkp/
+
+# Cursor
+.cursor/
+
+# Local project data and downloaded weights (host volumes, not the image)
+projects/*
+!projects/.gitkeep
+weights/*
+!weights/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.coverage
+htmlcov/
+pytest.ini
+
+# Local secrets / machine ids
+.venv
+PROJECT.md

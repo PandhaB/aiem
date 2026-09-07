@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }}{% endblock %}
+{% block content %}
+<p class="crumb"><a href="/">Projects</a> / {{ project.name }}</p>
+<header class="page-head">
+  <div>
+    <h1>{{ project.name }}</h1>
+    <p class="muted">Engine: {{ project.engine }} · {{ project.classes | map(attribute='name') | join(', ') }}</p>
+  </div>
+  <nav class="actions">
+    <a class="button" href="/projects/{{ project.id }}/annotate">Annotate</a>
+    <a class="button" href="/projects/{{ project.id }}/train">Train</a>
+    <a class="button" href="/projects/{{ project.id }}/infer">Infer</a>
+  </nav>
+</header>
+
+<section class="grid-3">
+  <article class="card">
+    <h2>Images</h2>
+    <p class="stat">{{ image_count }}</p>
+    <form id="upload-form" class="stack">
+      <input type="file" name="files" accept="image/*" multiple>
+      <button type="submit">Upload images</button>
+    </form>
+    <button type="button" id="import-ds1" class="secondary">Import 8 tiles from DS-1</button>
+    <p id="import-status" class="muted"></p>
+  </article>
+  <article class="card">
+    <h2>Polygons</h2>
+    <p class="stat">{{ annotation_count }}</p>
+    <p>Saved as COCO JSON in the project folder.</p>
+  </article>
+  <article class="card">
+    <h2>Checkpoints</h2>
+    {% if checkpoints %}
+    <ul>
+      {% for item in checkpoints %}
+      <li><code>{{ item.name }}</code></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">Train to produce a checkpoint. Weight files stay on the host, not in the Docker image.</p>
+    {% endif %}
+  </article>
+</section>
+
+<section class="card">
+  <h2>Recent runs</h2>
+  {% if runs %}
+  <table>
+    <thead>
+      <tr><th>Run</th><th>Kind</th><th>Status</th><th>Message</th></tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><code>{{ run.id }}</code></td>
+        <td>{{ run.kind }}</td>
+        <td>{{ run.status }}</td>
+        <td>{{ run.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No train or infer jobs yet.</p>
+  {% endif %}
+</section>
+
+<section class="card danger-zone">
+  <h2>Delete this project</h2>
+  <p>This permanently removes images, polygons, runs and weights stored in the project folder. It cannot be undone.</p>
+  <button type="button" class="danger" id="delete-project">Delete project…</button>
+  <p id="delete-error" class="error" hidden></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const projectId = "{{ project.id }}";
+  document.getElementById("upload-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = event.target.files;
+    if (!input.files.length) return;
+    const body = new FormData();
+    for (const file of input.files) body.append("files", file);
+    const response = await fetch(`/api/projects/${projectId}/images`, { method: "POST", body });
+    if (response.ok) window.location.reload();
+    else {
+      const payload = await response.json();
+      alert(payload.detail || "Upload failed.");
+    }
+  });
+  document.getElementById("import-ds1").addEventListener("click", async () => {
+    const status = document.getElementById("import-status");
+    status.textContent = "Importing…";
+    const response = await fetch(`/api/projects/${projectId}/import-dataset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ relative_path: "DS-1/all", limit: 8 }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      status.textContent = payload.detail || "Import failed.";
+      return;
+    }
+    window.location.reload();
+  });
+  document.getElementById("delete-project").addEventListener("click", async () => {
+    const confirmed = window.confirm(
+      "Delete this project and all of its data (images, annotations, runs, weights)? This cannot be undone."
+    );
+    if (!confirmed) return;
+    const error = document.getElementById("delete-error");
+    const response = await fetch(`/api/projects/${projectId}`, { method: "DELETE" });
+    if (!response.ok) {
+      const payload = await response.json();
+      error.hidden = false;
+      error.textContent = payload.detail || "Could not delete the project.";
+      return;
+    }
+    window.location.href = "/";
+  });
+</script>
+{% endblock %}

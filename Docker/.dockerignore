@@ -1,0 +1,9 @@
+bkp
+.git
+.cursor
+.pytest_cache
+**/__pycache__
+projects/*
+weights/*
+.venv
+venv

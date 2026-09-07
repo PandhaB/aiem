@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Train · {{ project.name }}{% endblock %}
+{% block content %}
+<p class="crumb"><a href="/">Projects</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Train</p>
+<header class="page-head">
+  <h1>Train</h1>
+  <p class="muted">This scaffold uses the stub engine. It writes a fake checkpoint so you can test the job flow. No neural network is trained.</p>
+</header>
+<section class="card stack narrow">
+  <fieldset>
+    <legend>Weight initialisation</legend>
+    <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights (simulated)</label>
+    <label class="choice"><input type="radio" name="init" value="random"> Random weights</label>
+  </fieldset>
+  <button type="button" id="start-train">Start training</button>
+  <div id="job-box" class="job-box" hidden>
+    <p><strong id="job-status">queued</strong> — <span id="job-message"></span></p>
+    <progress id="job-progress" max="1" value="0"></progress>
+  </div>
+  <p id="job-error" class="error" hidden></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const projectId = "{{ project.id }}";
+  document.getElementById("start-train").addEventListener("click", async () => {
+    const init = document.querySelector("input[name=init]:checked").value;
+    const error = document.getElementById("job-error");
+    error.hidden = true;
+    const response = await fetch(`/api/projects/${projectId}/jobs/train`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ init }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      error.hidden = false;
+      error.textContent = payload.detail || "Could not start training.";
+      return;
+    }
+    window.pollJob(payload.id, {
+      box: document.getElementById("job-box"),
+      status: document.getElementById("job-status"),
+      message: document.getElementById("job-message"),
+      progress: document.getElementById("job-progress"),
+      error,
+    });
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Projects</h1>
+  <p>Create a project, import TEM images, draw polygons, then train and run instance segmentation. The current engine is a stub (fake backend) so the full path works without a GPU.</p>
+</section>
+
+<section class="grid-2">
+  <article class="card">
+    <h2>New project</h2>
+    <form id="create-form" class="stack">
+      <label>Name
+        <input type="text" name="name" required placeholder="Dislocation loops">
+      </label>
+      <label>Classes (comma-separated)
+        <input type="text" name="classes" required placeholder="Loop-A, Loop-B, Loop-C">
+      </label>
+      <button type="submit">Create project</button>
+      <p id="create-error" class="error" hidden></p>
+    </form>
+  </article>
+  <article class="card">
+    <h2>Existing projects</h2>
+    {% if projects %}
+    <ul class="project-list">
+      {% for project in projects %}
+      <li>
+        <a href="/projects/{{ project.id }}">{{ project.name }}</a>
+        <span class="muted">{{ project.classes | map(attribute='name') | join(', ') }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">No projects yet.</p>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  document.getElementById("create-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const error = document.getElementById("create-error");
+    const classes = form.classes.value.split(",").map((item) => item.trim()).filter(Boolean);
+    const response = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: form.name.value, classes, engine: "stub" }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      error.hidden = false;
+      error.textContent = payload.detail || "Could not create the project.";
+      return;
+    }
+    window.location.href = "/projects/" + payload.id;
+  });
+</script>
+{% endblock %}

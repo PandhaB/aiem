@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Infer · {{ project.name }}{% endblock %}
+{% block content %}
+<p class="crumb"><a href="/">Projects</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Infer</p>
+<header class="page-head">
+  <h1>Infer</h1>
+  <p class="muted">Run instance segmentation, then download a colourised overlay, mask files, and COCO JSON.</p>
+</header>
+<section class="grid-2">
+  <article class="card stack">
+    <label>Checkpoint
+      <select id="checkpoint">
+        {% if checkpoints %}
+          {% for item in checkpoints %}
+          <option value="{{ item.name }}">{{ item.name }}</option>
+          {% endfor %}
+        {% else %}
+          <option value="">Train first — no checkpoint yet</option>
+        {% endif %}
+      </select>
+    </label>
+    <fieldset>
+      <legend>Overlay colours</legend>
+      {% for item in project.classes %}
+      <label class="choice">{{ item.name }}
+        <input type="color" data-class="{{ item.name }}" value="{{ item.color }}">
+      </label>
+      {% endfor %}
+    </fieldset>
+    <button type="button" id="start-infer" {% if not checkpoints %}disabled{% endif %}>Start inference</button>
+    <div id="job-box" class="job-box" hidden>
+      <p><strong id="job-status">queued</strong> — <span id="job-message"></span></p>
+      <progress id="job-progress" max="1" value="0"></progress>
+    </div>
+    <p id="job-error" class="error" hidden></p>
+    <div id="downloads" class="stack" hidden>
+      <a id="dl-overlay" class="button" href="#">Download overlays (zip)</a>
+      <a id="dl-masks" class="button" href="#">Download masks (zip)</a>
+      <a id="dl-coco" class="button" href="#">Download COCO JSON</a>
+    </div>
+  </article>
+  <article class="card">
+    <h2>Preview</h2>
+    <img id="preview" alt="Overlay preview will appear here" hidden>
+    <p id="preview-empty" class="muted">Run inference to see a colourised overlay.</p>
+  </article>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const projectId = "{{ project.id }}";
+  document.getElementById("start-infer").addEventListener("click", async () => {
+    const error = document.getElementById("job-error");
+    error.hidden = true;
+    const overlay_colors = {};
+    document.querySelectorAll("input[type=color]").forEach((input) => {
+      overlay_colors[input.dataset.class] = input.value;
+    });
+    const checkpoint = document.getElementById("checkpoint").value;
+    const response = await fetch(`/api/projects/${projectId}/jobs/infer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ overlay_colors, checkpoint_name: checkpoint || null }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      error.hidden = false;
+      error.textContent = payload.detail || "Could not start inference.";
+      return;
+    }
+    window.pollJob(payload.id, {
+      box: document.getElementById("job-box"),
+      status: document.getElementById("job-status"),
+      message: document.getElementById("job-message"),
+      progress: document.getElementById("job-progress"),
+      error,
+      onComplete: async (job) => {
+        const downloads = document.getElementById("downloads");
+        downloads.hidden = false;
+        const base = `/api/projects/${projectId}/runs/${job.id}/download`;
+        document.getElementById("dl-overlay").href = `${base}/overlays`;
+        document.getElementById("dl-masks").href = `${base}/masks`;
+        document.getElementById("dl-coco").href = `${base}/coco`;
+        const coco = await (await fetch(`/api/projects/${projectId}/annotations`)).json();
+        if (coco.images && coco.images.length) {
+          const preview = document.getElementById("preview");
+          preview.src = `/api/projects/${projectId}/runs/${job.id}/overlays/${coco.images[0].file_name}`;
+          preview.hidden = false;
+          document.getElementById("preview-empty").hidden = true;
+        }
+      },
+    });
+  });
+</script>
+{% endblock %}

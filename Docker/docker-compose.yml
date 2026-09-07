@@ -1,0 +1,32 @@
+# Local v1: one service (web UI + API + jobs).
+# Model weight files stay on the host via the weights/ and projects/ volumes.
+# They are never copied into the image.
+#
+# GPU (later, when a real training backend is wired):
+#   deploy:
+#     resources:
+#       reservations:
+#         devices:
+#           - driver: nvidia
+#             count: all
+#             capabilities: [gpu]
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../projects:/data/projects
+      - ../Datasets:/data/datasets
+      - ../weights:/data/weights
+    environment:
+      AITEM_PROJECTS_DIR: /data/projects
+      AITEM_DATASETS_DIR: /data/datasets
+      AITEM_WEIGHTS_DIR: /data/weights
+      # Host user so files in projects/ and weights/ are yours to edit or delete.
+      # UID is a reserved bash variable — use HOST_UID, not UID.
+      HOST_UID: "${HOST_UID:-1000}"
+      HOST_GID: "${HOST_GID:-1000}"
