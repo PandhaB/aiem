@@ -32,11 +32,11 @@ def _png_bytes() -> bytes:
 
 
 def _wait_job(client: TestClient, job_id: str) -> dict:
-    for _ in range(80):
+    for _ in range(200):
         response = client.get(f"/api/jobs/{job_id}")
         assert response.status_code == 200
         job = response.json()
-        if job["status"] in {"completed", "failed"}:
+        if job["status"] in {"completed", "failed", "stopped"}:
             return job
         time.sleep(0.05)
     raise AssertionError(f"Job {job_id} did not finish in time.")
@@ -77,11 +77,18 @@ def test_create_upload_annotate_train_infer(client: TestClient) -> None:
 
     train = client.post(
         f"/api/projects/{project_id}/jobs/train",
-        json={"init": "random"},
+        json={"init": "random", "max_iter": 4, "checkpoint_period": 2},
     )
     assert train.status_code == 200
     train_job = _wait_job(client, train.json()["id"])
     assert train_job["status"] == "completed", train_job.get("error")
+    assert train_job["log"]
+    assert train_job["history"]
+    assert train_job["history"][0]["total_loss"] > 0
+    weights = client.get(f"/api/projects/{project_id}").json()["checkpoints"]
+    names = {item["name"] for item in weights}
+    assert "model_0002.stub.json" in names
+    assert "model_0004.stub.json" in names
 
     infer = client.post(
         f"/api/projects/{project_id}/jobs/infer",
@@ -147,3 +154,34 @@ def test_engines_models_and_status(client: TestClient) -> None:
     assert "cuda" in body
     assert "device" in body
     assert body["gpu_recommended"] is True
+
+
+def test_stop_training_saves_named_checkpoint(client: TestClient) -> None:
+    created = client.post(
+        "/api/projects",
+        json={"name": "Stop Me", "classes": ["Loop-A"], "engine": "stub"},
+    )
+    project_id = created.json()["id"]
+    client.post(
+        f"/api/projects/{project_id}/images",
+        files=[("files", ("tile.png", _png_bytes(), "image/png"))],
+    )
+    train = client.post(
+        f"/api/projects/{project_id}/jobs/train",
+        json={"init": "random", "max_iter": 80},
+    )
+    assert train.status_code == 200
+    job_id = train.json()["id"]
+    stopped = client.post(f"/api/jobs/{job_id}/stop")
+    assert stopped.status_code == 200
+    job = _wait_job(client, job_id)
+    assert job["status"] == "stopped", job.get("error")
+    assert job["iteration"] >= 1
+    assert job["iteration"] < 80
+    weights = client.get(f"/api/projects/{project_id}").json()["checkpoints"]
+    assert any(item["name"].startswith("model_") for item in weights)
+
+
+def test_stop_unknown_job(client: TestClient) -> None:
+    response = client.post("/api/jobs/missing-job/stop")
+    assert response.status_code == 404

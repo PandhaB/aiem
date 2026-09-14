@@ -33,7 +33,10 @@ class SaveAnnotationsBody(BaseModel):
 
 class TrainBody(BaseModel):
     init: str = "pretrained"
-    max_iter: int | None = None
+    max_iter: int | None = Field(default=None, ge=1)
+    checkpoint_period: int | None = Field(default=None, ge=1)
+    learning_rate: float | None = Field(default=None, gt=0)
+    ims_per_batch: int | None = Field(default=None, ge=1)
 
 
 class InferBody(BaseModel):
@@ -186,7 +189,14 @@ def put_annotations(request: Request, project_id: str, body: SaveAnnotationsBody
 def start_train(request: Request, project_id: str, body: TrainBody) -> dict:
     _project_or_404(request, project_id)
     try:
-        return _jobs(request).start_train(project_id, init=body.init, max_iter=body.max_iter)
+        return _jobs(request).start_train(
+            project_id,
+            init=body.init,
+            max_iter=body.max_iter,
+            checkpoint_period=body.checkpoint_period,
+            learning_rate=body.learning_rate,
+            ims_per_batch=body.ims_per_batch,
+        )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except JobError as exc:
@@ -214,6 +224,16 @@ def get_job(request: Request, job_id: str) -> dict:
         return _jobs(request).get(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/stop")
+def stop_job(request: Request, job_id: str) -> dict:
+    try:
+        return _jobs(request).request_stop(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except JobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/runs/{run_id}/download/{kind}")

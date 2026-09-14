@@ -54,6 +54,7 @@ def test_stub_train_and_infer_write_artifacts(tmp_path: Path) -> None:
         )
     )
     assert train.checkpoint_path.is_file()
+    assert train.checkpoint_path.name == "model_0004.stub.json"
     assert train.metrics_path.is_file()
     engine.load_checkpoint(train.checkpoint_path)
 
@@ -75,3 +76,39 @@ def test_stub_train_and_infer_write_artifacts(tmp_path: Path) -> None:
     coco_text = infer.coco_path.read_text(encoding="utf-8")
     assert "Loop-A" in coco_text
     assert "segmentation" in coco_text
+
+
+def test_stub_stop_and_periodic_checkpoints(tmp_path: Path) -> None:
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    _write_png(images_dir / "tile.png")
+    annotations = tmp_path / "annotations.json"
+    _write_coco(annotations, "tile.png")
+    events = []
+
+    def should_stop() -> bool:
+        return any(item.get("iteration") == 3 for _, _, item in events)
+
+    def on_progress(value, message, **extra):
+        events.append((value, message, extra))
+
+    engine = StubEngine()
+    result = engine.train(
+        TrainRequest(
+            images_dir=images_dir,
+            annotations_path=annotations,
+            class_names=["Loop-A"],
+            init="random",
+            output_dir=tmp_path / "train",
+            max_iter=12,
+            checkpoint_period=2,
+            should_stop=should_stop,
+        ),
+        on_progress=on_progress,
+    )
+    assert result.stopped is True
+    assert result.iteration == 3
+    assert result.checkpoint_path.name == "model_0003.stub.json"
+    assert (tmp_path / "train" / "model_0002.stub.json").is_file()
+    assert any("Training iteration" in (message or "") for _, message, _ in events)
+    assert any(item.get("metrics") for _, _, item in events)

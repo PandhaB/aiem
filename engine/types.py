@@ -6,7 +6,7 @@ from typing import Callable, Literal
 
 
 InitMode = Literal["pretrained", "random"]
-ProgressCallback = Callable[[float, str], None]
+ProgressCallback = Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -27,13 +27,20 @@ class TrainRequest:
     output_dir: Path
     pretrained_weights_path: Path | None = None
     max_iter: int | None = None
+    checkpoint_period: int | None = None
+    learning_rate: float | None = None
+    ims_per_batch: int | None = None
     model: str = "mask_rcnn_r50_fpn"
+    should_stop: Callable[[], bool] | None = None
 
 
 @dataclass
 class TrainResult:
     checkpoint_path: Path
     metrics_path: Path
+    stopped: bool = False
+    iteration: int | None = None
+    checkpoints: list[Path] = field(default_factory=list)
 
 
 @dataclass

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -13,8 +15,13 @@ from engine.types import (
     TrainRequest,
     TrainResult,
 )
+from engine.training import (
+    TrainingStopped,
+    checkpoint_filename,
+    format_eta,
+)
 
-CHECKPOINT_NAME = "model_final.stub.json"
+CHECKPOINT_SUFFIX = ".stub.json"
 PREDICTIONS_NAME = "predictions.json"
 
 
@@ -33,7 +40,7 @@ class StubEngine:
         request: TrainRequest,
         on_progress: ProgressCallback | None = None,
     ) -> TrainResult:
-        self._report(on_progress, 0.1, "Validating training inputs")
+        self._report(on_progress, 0.1, "Validating training inputs", log_line="Validating training inputs")
         if not request.images_dir.is_dir():
             raise FileNotFoundError(f"Images directory not found: {request.images_dir}")
         if not request.annotations_path.is_file():
@@ -44,30 +51,94 @@ class StubEngine:
             raise ValueError("Annotations file is not valid COCO JSON.")
 
         request.output_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = request.output_dir / CHECKPOINT_NAME
-        metrics_path = request.output_dir / "metrics.json"
+        steps = max(1, request.max_iter or 4)
+        period = request.checkpoint_period
+        started = time.monotonic()
+        saved: list[Path] = []
+        stopped = False
+        last_iter = steps
 
-        self._report(on_progress, 0.5, "Writing stub checkpoint")
-        payload = {
-            "engine": self.name(),
-            "init": request.init,
-            "class_names": list(request.class_names),
-            "pretrained_weights_path": (
-                str(request.pretrained_weights_path)
-                if request.pretrained_weights_path
-                else None
-            ),
-            "max_iter": request.max_iter,
-            "image_count": len(coco.get("images", [])),
-            "annotation_count": len(coco.get("annotations", [])),
-        }
-        checkpoint_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        def maybe_stop(iteration: int) -> None:
+            if request.should_stop is not None and request.should_stop():
+                raise TrainingStopped(iteration)
+
+        try:
+            for iteration in range(1, steps + 1):
+                if request.should_stop is not None:
+                    time.sleep(0.02)
+                decay = math.exp(-3.0 * iteration / steps)
+                total_loss = 1.8 * decay + 0.15
+                metrics = {
+                    "total_loss": total_loss,
+                    "loss_mask": total_loss * 0.45,
+                    "loss_cls": total_loss * 0.3,
+                }
+                elapsed = time.monotonic() - started
+                eta = (elapsed / iteration) * (steps - iteration) if iteration < steps else 0
+                eta_text = format_eta(eta) if iteration < steps else None
+                message = f"Training iteration {iteration}/{steps}"
+                if eta_text:
+                    message += f" — ETA {eta_text}"
+                log_line = (
+                    f"iter: {iteration}/{steps}  total_loss: {total_loss:.4f}"
+                    + (f"  eta: {eta_text}" if eta_text else "")
+                )
+                checkpoint_path = None
+                if period is not None and iteration % period == 0:
+                    checkpoint_path = _write_stub_checkpoint(request, coco, iteration)
+                    saved.append(checkpoint_path)
+                    log_line += f"  saved {checkpoint_path.name}"
+                self._report(
+                    on_progress,
+                    0.1 + 0.85 * (iteration / steps),
+                    message,
+                    log_line=log_line,
+                    iteration=iteration,
+                    max_iter=steps,
+                    eta_seconds=eta,
+                    metrics=metrics,
+                    checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
+                )
+                last_iter = iteration
+                maybe_stop(iteration)
+        except TrainingStopped as exc:
+            stopped = True
+            last_iter = exc.iteration
+
+        checkpoint_path = _write_stub_checkpoint(request, coco, last_iter)
+        if checkpoint_path not in saved:
+            saved.append(checkpoint_path)
+        metrics_path = request.output_dir / "metrics.json"
         metrics_path.write_text(
-            json.dumps({"loss": 0.0, "iterations": request.max_iter or 1}, indent=2),
+            json.dumps(
+                {
+                    "loss": 0.15 if not stopped else None,
+                    "iterations": last_iter,
+                    "stopped": stopped,
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
-        self._report(on_progress, 1.0, "Training complete")
-        return TrainResult(checkpoint_path=checkpoint_path, metrics_path=metrics_path)
+        if stopped:
+            self._report(
+                on_progress,
+                1.0,
+                f"Stopped at iteration {last_iter}",
+                log_line=f"Stopped at iteration {last_iter}. Saved {checkpoint_path.name}",
+                iteration=last_iter,
+                max_iter=steps,
+                checkpoint_path=str(checkpoint_path),
+            )
+        else:
+            self._report(on_progress, 1.0, "Training complete", log_line="Training complete")
+        return TrainResult(
+            checkpoint_path=checkpoint_path,
+            metrics_path=metrics_path,
+            stopped=stopped,
+            iteration=last_iter,
+            checkpoints=saved,
+        )
 
     def load_checkpoint(self, path: Path) -> None:
         if not path.is_file():
@@ -166,9 +237,27 @@ class StubEngine:
         return InferResult(coco_path=coco_path, overlay_dir=overlay_dir, masks_dir=masks_dir)
 
     @staticmethod
-    def _report(on_progress: ProgressCallback | None, value: float, message: str) -> None:
+    def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:
         if on_progress is not None:
-            on_progress(value, message)
+            on_progress(value, message, **extra)
+
+
+def _write_stub_checkpoint(request: TrainRequest, coco: dict, iteration: int) -> Path:
+    path = request.output_dir / checkpoint_filename(iteration, CHECKPOINT_SUFFIX)
+    payload = {
+        "engine": "stub",
+        "init": request.init,
+        "class_names": list(request.class_names),
+        "pretrained_weights_path": (
+            str(request.pretrained_weights_path) if request.pretrained_weights_path else None
+        ),
+        "max_iter": request.max_iter,
+        "iteration": iteration,
+        "image_count": len(coco.get("images", [])),
+        "annotation_count": len(coco.get("annotations", [])),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
 
 
 def _list_images(images_dir: Path) -> list[Path]:

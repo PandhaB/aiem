@@ -28,7 +28,11 @@ class SegmentationEngine(Protocol):
         request: TrainRequest,
         on_progress: ProgressCallback | None = None,
     ) -> TrainResult:
-        """Fine-tune or train from random weights. Writes a checkpoint under output_dir."""
+        """Fine-tune or train from random weights. Writes a checkpoint under output_dir.
+
+        Backends that honour ``request.should_stop`` should save a named checkpoint
+        and return ``TrainResult(stopped=True)`` instead of raising to the UI.
+        """
 
     def infer(
         self,

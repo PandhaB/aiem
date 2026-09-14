@@ -50,6 +50,44 @@ h1, h2 { font-weight: 600; margin: 0 0 0.5rem; }
 .stack { display: flex; flex-direction: column; gap: 0.7rem; }
 [hidden] { display: none !important; }
 .narrow { max-width: 36rem; }
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.7rem;
+}
+.train-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.terminal {
+  background: #1c2430;
+  color: #d7e0ea;
+  padding: 0.75rem 0.9rem;
+  border-radius: 6px;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  margin: 0;
+}
+.curve-canvas {
+  width: 100%;
+  height: auto;
+  background: #fffdf8;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: default;
+  display: block;
+}
+.legend { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.swatch {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+.swatch-total { background: #b23a2f; }
+.swatch-mask { background: #2a9d8f; }
 label { display: flex; flex-direction: column; gap: 0.3rem; }
 input[type="text"], input[type="file"], input[type="number"], select {
   padding: 0.45rem 0.5rem;
@@ -93,7 +131,7 @@ th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var
   align-items: start;
 }
 .canvas-wrap { padding: 0.6rem; }
-canvas {
+.canvas-wrap canvas {
   width: 100%;
   height: auto;
   background: #111;

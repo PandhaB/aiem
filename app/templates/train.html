@@ -11,36 +11,87 @@
   {% endif %}
   <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
 </header>
-<section class="card stack narrow">
-  <fieldset>
-    <legend>Weight initialisation</legend>
-    <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights</label>
-    <label class="choice"><input type="radio" name="init" value="random"> Random weights</label>
-  </fieldset>
-  <label>Max iterations
-    <input type="number" name="max_iter" id="max-iter" min="1" step="1" value="300">
-  </label>
-  <p class="muted">Use a small number (for example 20) for a smoke check. A useful fine-tune needs more.</p>
-  <button type="button" id="start-train">Start training</button>
-  <div id="job-box" class="job-box" hidden>
-    <p><strong id="job-status">queued</strong> — <span id="job-message"></span></p>
-    <progress id="job-progress" max="1" value="0"></progress>
-  </div>
-  <p id="job-error" class="error" hidden></p>
+<section class="stack">
+  <article class="card stack">
+    <fieldset>
+      <legend>Weight initialisation</legend>
+      <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights</label>
+      <label class="choice"><input type="radio" name="init" value="random"> Random weights</label>
+    </fieldset>
+    <div class="param-grid">
+      <label>Max iterations
+        <input type="number" name="max_iter" id="max-iter" min="1" step="1" value="300">
+      </label>
+      <label>Save weights every N iterations
+        <input type="number" name="checkpoint_period" id="checkpoint-period" min="1" step="1" placeholder="Only at the end">
+      </label>
+      <label>Learning rate
+        <input type="number" name="learning_rate" id="learning-rate" min="0" step="0.00001" value="0.00025">
+      </label>
+      <label>Images per batch
+        <input type="number" name="ims_per_batch" id="ims-per-batch" min="1" step="1" value="1">
+      </label>
+    </div>
+    <p class="muted">Leave “save every N” empty to keep only the last weights (and a save if you stop). Keep the batch size at 1 if GPU memory is tight. Use a small max iteration count (for example 20) for a smoke check.</p>
+    <div class="train-actions">
+      <button type="button" id="start-train">Start training</button>
+      <button type="button" id="stop-train" class="secondary" disabled>Stop training</button>
+    </div>
+    <div id="job-box" class="job-box" hidden>
+      <p><strong id="job-status">queued</strong> — <span id="job-message"></span></p>
+      <progress id="job-progress" max="1" value="0"></progress>
+    </div>
+    <p id="job-error" class="error" hidden></p>
+  </article>
+  <article class="card stack" id="live-panel" hidden>
+    <h2>Training log</h2>
+    <pre id="train-log" class="terminal" aria-live="polite"></pre>
+  </article>
+  <article class="card stack" id="curves-panel" hidden>
+    <h2>Learning curves</h2>
+    <p class="muted" id="curves-empty">Loss values appear after the first iteration.</p>
+    <canvas id="loss-curves" class="curve-canvas" width="900" height="260" hidden></canvas>
+    <p class="muted legend" id="curves-legend" hidden>
+      <span class="swatch swatch-total"></span> Total loss
+      <span class="swatch swatch-mask"></span> Mask loss
+    </p>
+  </article>
 </section>
 {% endblock %}
 {% block scripts %}
 <script>
   const projectId = "{{ project.id }}";
-  document.getElementById("start-train").addEventListener("click", async () => {
+  const startBtn = document.getElementById("start-train");
+  const stopBtn = document.getElementById("stop-train");
+  const lrInput = document.getElementById("learning-rate");
+  let activeJobId = null;
+
+  document.querySelectorAll("input[name=init]").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (lrInput.dataset.touched) return;
+      lrInput.value = input.value === "random" ? "0.0001" : "0.00025";
+    });
+  });
+  lrInput.addEventListener("input", () => {
+    lrInput.dataset.touched = "1";
+  });
+
+  startBtn.addEventListener("click", async () => {
     const init = document.querySelector("input[name=init]:checked").value;
     const maxIter = Number(document.getElementById("max-iter").value);
+    const periodRaw = document.getElementById("checkpoint-period").value;
+    const lrRaw = document.getElementById("learning-rate").value;
+    const batchRaw = document.getElementById("ims-per-batch").value;
     const error = document.getElementById("job-error");
     error.hidden = true;
+    const body = { init, max_iter: maxIter || null };
+    if (periodRaw) body.checkpoint_period = Number(periodRaw);
+    if (lrRaw) body.learning_rate = Number(lrRaw);
+    if (batchRaw) body.ims_per_batch = Number(batchRaw);
     const response = await fetch(`/api/projects/${projectId}/jobs/train`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ init, max_iter: maxIter || null }),
+      body: JSON.stringify(body),
     });
     const payload = await response.json();
     if (!response.ok) {
@@ -48,13 +99,38 @@
       error.textContent = payload.detail || "Could not start training.";
       return;
     }
+    activeJobId = payload.id;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    document.getElementById("live-panel").hidden = false;
+    document.getElementById("curves-panel").hidden = false;
     window.pollJob(payload.id, {
       box: document.getElementById("job-box"),
       status: document.getElementById("job-status"),
       message: document.getElementById("job-message"),
       progress: document.getElementById("job-progress"),
       error,
+      log: document.getElementById("train-log"),
+      onTick: (job) => window.drawLossCurves(document.getElementById("loss-curves"), job.history || []),
+      onDone: () => {
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        activeJobId = null;
+      },
     });
+  });
+
+  stopBtn.addEventListener("click", async () => {
+    if (!activeJobId) return;
+    stopBtn.disabled = true;
+    const error = document.getElementById("job-error");
+    const response = await fetch(`/api/jobs/${activeJobId}/stop`, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) {
+      error.hidden = false;
+      error.textContent = payload.detail || "Could not stop training.";
+      stopBtn.disabled = false;
+    }
   });
 </script>
 {% endblock %}

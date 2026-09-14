@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 import time
 from pathlib import Path
 
@@ -20,8 +22,15 @@ from engine.types import (
     TrainRequest,
     TrainResult,
 )
+from engine.training import (
+    TrainingStopped,
+    as_float_metrics,
+    checkpoint_filename,
+    default_learning_rate,
+    format_eta,
+)
 
-CHECKPOINT_NAME = "model_final.pth"
+CHECKPOINT_SUFFIX = ".pth"
 PREDICTIONS_NAME = "predictions.json"
 
 
@@ -62,6 +71,11 @@ class Detectron2Engine:
             str(request.annotations_path),
             str(request.images_dir),
         )
+        max_iter = request.max_iter or 300
+        stopped = False
+        last_iter = max_iter
+        named_checkpoint: Path | None = None
+        log_handler = None
         try:
             cfg = _build_train_cfg(
                 detectron2,
@@ -71,19 +85,37 @@ class Detectron2Engine:
                 n_classes=len(request.class_names),
                 init=request.init,
                 weights_path=request.pretrained_weights_path,
-                max_iter=request.max_iter or 300,
+                max_iter=max_iter,
                 output_dir=request.output_dir,
+                learning_rate=request.learning_rate,
+                ims_per_batch=request.ims_per_batch,
             )
-            trainer = _ProgressTrainer(cfg, on_progress)
+            trainer = _ProgressTrainer(
+                cfg,
+                on_progress,
+                should_stop=request.should_stop,
+                checkpoint_period=request.checkpoint_period,
+            )
+            log_handler = _install_log_handler(on_progress)
             trainer.resume_or_load(resume=False)
-            self._report(on_progress, 0.12, "Starting Detectron2 training")
-            trainer.train()
+            self._report(on_progress, 0.12, "Starting Detectron2 training", log_line="Starting Detectron2 training")
+            try:
+                trainer.train()
+            except TrainingStopped as exc:
+                stopped = True
+                last_iter = exc.iteration
+                named_checkpoint = exc.checkpoint_path
         finally:
+            if log_handler is not None:
+                _remove_log_handler(log_handler)
             _unregister(detectron2, dataset_name)
 
-        checkpoint_path = request.output_dir / CHECKPOINT_NAME
-        if not checkpoint_path.is_file():
-            raise FileNotFoundError(f"Detectron2 did not write {CHECKPOINT_NAME}")
+        if named_checkpoint is None or not named_checkpoint.is_file():
+            named_checkpoint = _ensure_named_checkpoint(request.output_dir, last_iter)
+        if not named_checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Detectron2 did not write {checkpoint_filename(last_iter, CHECKPOINT_SUFFIX)}"
+            )
         metrics_path = request.output_dir / "metrics.json"
         metrics_path.write_text(
             json.dumps(
@@ -91,7 +123,12 @@ class Detectron2Engine:
                     "engine": self.name(),
                     "model": spec.id,
                     "init": request.init,
-                    "max_iter": request.max_iter or 300,
+                    "max_iter": max_iter,
+                    "iteration": last_iter,
+                    "stopped": stopped,
+                    "learning_rate": request.learning_rate or default_learning_rate(request.init),
+                    "ims_per_batch": request.ims_per_batch or 1,
+                    "checkpoint_period": request.checkpoint_period,
                     "device": device_info["device"],
                     "cuda": device_info["cuda"],
                     "num_classes": len(request.class_names),
@@ -100,8 +137,30 @@ class Detectron2Engine:
             ),
             encoding="utf-8",
         )
-        self._report(on_progress, 1.0, "Training complete")
-        return TrainResult(checkpoint_path=checkpoint_path, metrics_path=metrics_path)
+        if stopped:
+            self._report(
+                on_progress,
+                1.0,
+                f"Stopped at iteration {last_iter}",
+                log_line=f"Stopped at iteration {last_iter}. Saved {named_checkpoint.name}",
+                iteration=last_iter,
+                max_iter=max_iter,
+                checkpoint_path=str(named_checkpoint),
+            )
+        else:
+            self._report(on_progress, 1.0, "Training complete", log_line="Training complete")
+        checkpoints = sorted(
+            path
+            for path in request.output_dir.glob("model_*.pth")
+            if path.is_file() and path.stem.split("_", 1)[-1].isdigit()
+        )
+        return TrainResult(
+            checkpoint_path=named_checkpoint,
+            metrics_path=metrics_path,
+            stopped=stopped,
+            iteration=last_iter,
+            checkpoints=checkpoints,
+        )
 
     def load_checkpoint(self, path: Path) -> None:
         reject_incompatible_checkpoint(path, self.name())
@@ -246,9 +305,9 @@ class Detectron2Engine:
         return InferResult(coco_path=coco_path, overlay_dir=overlay_dir, masks_dir=masks_dir)
 
     @staticmethod
-    def _report(on_progress: ProgressCallback | None, value: float, message: str) -> None:
+    def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:
         if on_progress is not None:
-            on_progress(value, message)
+            on_progress(value, message, **extra)
 
 
 def _detectron2():
@@ -302,15 +361,20 @@ def _build_train_cfg(
     weights_path: Path | None,
     max_iter: int,
     output_dir: Path,
+    learning_rate: float | None = None,
+    ims_per_batch: int | None = None,
 ):
     cfg = detectron2.get_cfg()
     cfg.merge_from_file(detectron2.model_zoo.get_config_file(config_name))
     cfg.DATASETS.TRAIN = (dataset_name,)
     cfg.DATASETS.TEST = ()
     cfg.DATALOADER.NUM_WORKERS = 0
-    cfg.SOLVER.IMS_PER_BATCH = 1
-    cfg.SOLVER.CHECKPOINT_PERIOD = max(1, max_iter)
-    cfg.SOLVER.BASE_LR = 0.00025
+    cfg.SOLVER.IMS_PER_BATCH = max(1, ims_per_batch or 1)
+    # PeriodicCheckpointer is disabled here; the progress hook writes model_NNNN.pth.
+    cfg.SOLVER.CHECKPOINT_PERIOD = max(max_iter + 1, 10**9)
+    cfg.SOLVER.BASE_LR = (
+        float(learning_rate) if learning_rate is not None else default_learning_rate(init)
+    )
     cfg.SOLVER.MAX_ITER = max(1, max_iter)
     cfg.SOLVER.STEPS = []
     cfg.SOLVER.WARMUP_ITERS = min(100, max(0, cfg.SOLVER.MAX_ITER // 10))
@@ -331,7 +395,8 @@ def _build_train_cfg(
         cfg.MODEL.WEIGHTS = ""
         cfg.MODEL.BACKBONE.FREEZE_AT = 0
         cfg.MODEL.RESNETS.NORM = "BN"
-        cfg.SOLVER.BASE_LR = 0.0001
+        if learning_rate is None:
+            cfg.SOLVER.BASE_LR = default_learning_rate("random")
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.INPUT.MASK_FORMAT = "polygon"
     return cfg
@@ -351,14 +416,28 @@ def _build_infer_cfg(detectron2, torch, config_name: str, n_classes: int, checkp
 class _ProgressTrainer:
     """Wrapper so Detectron2 is imported only when training actually runs."""
 
-    def __init__(self, cfg, on_progress: ProgressCallback | None) -> None:
+    def __init__(
+        self,
+        cfg,
+        on_progress: ProgressCallback | None,
+        should_stop=None,
+        checkpoint_period: int | None = None,
+    ) -> None:
         detectron2 = _detectron2()
+        started_at = time.monotonic()
 
         class Trainer(detectron2.engine.DefaultTrainer):
             def build_hooks(self):
                 built = super().build_hooks()
-                if on_progress is not None:
-                    built.append(_ProgressHook(detectron2.engine.HookBase, on_progress))
+                built.append(
+                    _ProgressHook(
+                        detectron2.engine.HookBase,
+                        on_progress,
+                        should_stop,
+                        checkpoint_period,
+                        started_at,
+                    )
+                )
                 return built
 
         self._trainer = Trainer(cfg)
@@ -370,14 +449,125 @@ class _ProgressTrainer:
         self._trainer.train()
 
 
-def _ProgressHook(hook_base, on_progress: ProgressCallback):
+def _ProgressHook(hook_base, on_progress, should_stop, checkpoint_period, started_at):
     class ProgressHook(hook_base):
         def after_step(self):
             current = self.trainer.iter + 1
             total = max(self.trainer.max_iter, 1)
-            on_progress(0.12 + 0.85 * (current / total), f"Training iteration {current}/{total}")
+            elapsed = time.monotonic() - started_at
+            eta = (elapsed / current) * (total - current) if current >= 2 else None
+            eta_text = format_eta(eta)
+            message = f"Training iteration {current}/{total}"
+            if eta_text:
+                message += f" — ETA {eta_text}"
+            metrics = _metrics_from_trainer(self.trainer)
+            log_line = f"iter: {current}/{total}"
+            if "total_loss" in metrics:
+                log_line += f"  total_loss: {metrics['total_loss']:.4f}"
+            if eta_text:
+                log_line += f"  eta: {eta_text}"
+            saved = None
+            if checkpoint_period and current % checkpoint_period == 0:
+                saved = _save_named_checkpoint(self.trainer, current)
+                log_line += f"  saved {saved.name}"
+            stopped = should_stop is not None and should_stop()
+            if stopped and saved is None:
+                saved = _save_named_checkpoint(self.trainer, current)
+                log_line += f"  saved {saved.name}"
+            if on_progress is not None:
+                on_progress(
+                    0.12 + 0.85 * (current / total),
+                    message,
+                    log_line=log_line,
+                    iteration=current,
+                    max_iter=total,
+                    eta_seconds=eta,
+                    metrics=metrics or None,
+                    checkpoint_path=str(saved) if saved else None,
+                )
+            if stopped:
+                raise TrainingStopped(current, saved)
+
+        def after_train(self):
+            if should_stop is not None and should_stop():
+                return
+            current = max(int(getattr(self.trainer, "iter", 0)), self.trainer.max_iter)
+            saved = _save_named_checkpoint(self.trainer, current)
+            if on_progress is not None:
+                on_progress(
+                    0.97,
+                    f"Training iteration {current}/{max(self.trainer.max_iter, 1)}",
+                    log_line=f"Saved {saved.name}",
+                    iteration=current,
+                    max_iter=max(self.trainer.max_iter, 1),
+                    checkpoint_path=str(saved),
+                )
 
     return ProgressHook()
+
+
+def _metrics_from_trainer(trainer) -> dict[str, float]:
+    storage = getattr(trainer, "storage", None)
+    if storage is None:
+        return {}
+    try:
+        latest = storage.latest()
+    except Exception:
+        return {}
+    return as_float_metrics(latest)
+
+
+def _save_named_checkpoint(trainer, iteration: int) -> Path:
+    stem = checkpoint_filename(iteration, CHECKPOINT_SUFFIX).removesuffix(CHECKPOINT_SUFFIX)
+    trainer.checkpointer.save(stem)
+    return Path(trainer.cfg.OUTPUT_DIR) / f"{stem}{CHECKPOINT_SUFFIX}"
+
+
+def _ensure_named_checkpoint(output_dir: Path, iteration: int) -> Path:
+    named = output_dir / checkpoint_filename(iteration, CHECKPOINT_SUFFIX)
+    if named.is_file():
+        return named
+    fallback = output_dir / "model_final.pth"
+    if fallback.is_file():
+        shutil.copy2(fallback, named)
+    return named
+
+
+def _install_log_handler(on_progress: ProgressCallback | None) -> logging.Handler | None:
+    if on_progress is None:
+        return None
+    handler = _ProgressLogHandler(on_progress)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    for name in ("detectron2", "fvcore"):
+        logging.getLogger(name).addHandler(handler)
+        logging.getLogger(name).setLevel(logging.INFO)
+    return handler
+
+
+def _remove_log_handler(handler: logging.Handler) -> None:
+    for name in ("detectron2", "fvcore"):
+        logging.getLogger(name).removeHandler(handler)
+
+
+class _ProgressLogHandler(logging.Handler):
+    def __init__(self, on_progress: ProgressCallback) -> None:
+        super().__init__()
+        self._on_progress = on_progress
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.exc_info:
+            return
+        try:
+            line = self.format(record)
+        except Exception:
+            return
+        if not line:
+            return
+        try:
+            self._on_progress(None, None, log_line=line)
+        except Exception:
+            pass
 
 
 def _unregister(detectron2, name: str) -> None:

@@ -11,6 +11,7 @@ from pathlib import Path
 from core.projects import ProjectStore
 from engine.catalog import DEFAULT_MODEL, ensure_pretrained, reject_incompatible_checkpoint
 from engine.registry import get_engine
+from engine.training import format_eta
 from engine.types import InferRequest, TrainRequest
 
 
@@ -28,6 +29,7 @@ class JobRunner:
         self._lock = threading.Lock()
         self._busy = False
         self._jobs: dict[str, Path] = {}
+        self._stop_events: dict[str, threading.Event] = {}
 
     def get(self, job_id: str) -> dict:
         with self._lock:
@@ -36,14 +38,37 @@ class JobRunner:
             path = self._find_status(job_id)
         if path is None or not path.is_file():
             raise FileNotFoundError(f"Job not found: {job_id}")
-        return _read_json(path)
+        payload = _read_json(path)
+        run_dir = path.parent
+        payload["history"] = _read_jsonl(run_dir / "history.jsonl")
+        payload["log"] = _tail_lines(run_dir / "train.log", 400)
+        if payload.get("eta_seconds") is not None and not payload.get("eta"):
+            payload["eta"] = format_eta(payload["eta_seconds"])
+        return payload
 
-    def start_train(self, project_id: str, init: str, max_iter: int | None = None) -> dict:
+    def start_train(
+        self,
+        project_id: str,
+        init: str,
+        max_iter: int | None = None,
+        checkpoint_period: int | None = None,
+        learning_rate: float | None = None,
+        ims_per_batch: int | None = None,
+    ) -> dict:
         if init not in {"pretrained", "random"}:
             raise ValueError("init must be 'pretrained' or 'random'.")
+        if max_iter is not None and max_iter < 1:
+            raise ValueError("max_iter must be at least 1.")
+        if checkpoint_period is not None and checkpoint_period < 1:
+            raise ValueError("checkpoint_period must be at least 1.")
+        if learning_rate is not None and learning_rate <= 0:
+            raise ValueError("learning_rate must be greater than 0.")
+        if ims_per_batch is not None and ims_per_batch < 1:
+            raise ValueError("ims_per_batch must be at least 1.")
         self._ensure_idle()
         record = self.store.get(project_id)
         run_dir = self._new_run_dir(record.runs_dir, "train")
+        resolved_max = max_iter or 300
         status = self._write_status(
             run_dir,
             {
@@ -57,10 +82,46 @@ class JobRunner:
                 "created_at": _now(),
                 "finished_at": None,
                 "result": None,
+                "iteration": 0,
+                "max_iter": resolved_max,
+                "eta_seconds": None,
+                "eta": None,
+                "checkpoints": [],
             },
         )
-        self._submit(self._run_train, record.id, init, max_iter, run_dir)
+        params = {
+            "init": init,
+            "max_iter": resolved_max,
+            "checkpoint_period": checkpoint_period,
+            "learning_rate": learning_rate,
+            "ims_per_batch": ims_per_batch,
+        }
+        self._submit(self._run_train, record.id, params, run_dir)
         return status
+
+    def request_stop(self, job_id: str) -> dict:
+        try:
+            status = self.get(job_id)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Job not found: {job_id}") from exc
+        if status.get("kind") != "train":
+            raise JobError("Only a running training job can be stopped.")
+        if status.get("status") in {"completed", "failed", "stopped"}:
+            return status
+        with self._lock:
+            event = self._stop_events.get(job_id)
+        if event is None:
+            raise JobError("Only a running training job can be stopped.")
+        event.set()
+        path = self._jobs.get(job_id) or self._find_status(job_id)
+        if path is not None and path.is_file():
+            with self._lock:
+                current = _read_json(path)
+                if current.get("status") in {"queued", "running"}:
+                    current["message"] = "Stopping after this iteration…"
+                    self._write_status_locked(path.parent, current)
+                    _append_line(path.parent / "train.log", "Stop requested")
+        return self.get(job_id)
 
     def start_infer(
         self,
@@ -103,39 +164,72 @@ class JobRunner:
             if self._busy:
                 raise JobError("A job is already running. Wait for it to finish.")
             self._busy = True
-            job_id = args[-1].name
-            self._jobs[job_id] = args[-1] / "status.json"
+            run_dir = args[-1]
+            job_id = run_dir.name
+            self._jobs[job_id] = run_dir / "status.json"
+            self._stop_events[job_id] = threading.Event()
         thread = threading.Thread(target=self._guarded, args=(target, *args), daemon=True)
         thread.start()
 
     def _guarded(self, target, *args) -> None:
+        run_dir = args[-1]
         try:
             target(*args)
         finally:
             with self._lock:
                 self._busy = False
+                self._stop_events.pop(run_dir.name, None)
 
     def _run_train(
         self,
         project_id: str,
-        init: str,
-        max_iter: int | None,
+        params: dict,
         run_dir: Path,
     ) -> None:
         record = self.store.get(project_id)
         status_path = run_dir / "status.json"
+        stop_event = self._stop_events.get(run_dir.name) or threading.Event()
 
-        def on_progress(value: float, message: str) -> None:
-            current = _read_json(status_path)
-            current["status"] = "running"
-            current["progress"] = value
-            current["message"] = message
-            self._write_status(run_dir, current)
+        def on_progress(value, message, **extra) -> None:
+            log_line = extra.get("log_line")
+            if log_line:
+                _append_line(run_dir / "train.log", str(log_line))
+            metrics = extra.get("metrics")
+            if metrics:
+                point = {"iter": extra.get("iteration")}
+                point.update(metrics)
+                _append_jsonl(run_dir / "history.jsonl", point)
+            with self._lock:
+                current = _read_json(status_path)
+                if current.get("status") in {"completed", "failed", "stopped"}:
+                    return
+                current["status"] = "running"
+                if value is not None:
+                    current["progress"] = value
+                if message:
+                    current["message"] = message
+                if extra.get("iteration") is not None:
+                    current["iteration"] = extra["iteration"]
+                if extra.get("max_iter") is not None:
+                    current["max_iter"] = extra["max_iter"]
+                if extra.get("eta_seconds") is not None:
+                    current["eta_seconds"] = extra["eta_seconds"]
+                    current["eta"] = format_eta(extra["eta_seconds"])
+                checkpoint_path = extra.get("checkpoint_path")
+                if checkpoint_path:
+                    published = self._publish_checkpoint(record.weights_dir, Path(checkpoint_path))
+                    if published is not None:
+                        names = list(current.get("checkpoints") or [])
+                        if published.name not in names:
+                            names.append(published.name)
+                        current["checkpoints"] = names
+                self._write_status_locked(run_dir, current)
 
         try:
-            on_progress(0.01, "Starting training")
+            on_progress(0.01, "Starting training", log_line="Starting training")
             engine = get_engine(record.engine)
             pretrained = None
+            init = params["init"]
             if init == "pretrained" and record.engine == "detectron2":
                 pretrained = ensure_pretrained(
                     self.shared_weights_dir,
@@ -149,27 +243,44 @@ class JobRunner:
                     images_dir=record.images_dir,
                     annotations_path=record.annotations_path,
                     class_names=[item.name for item in record.classes],
-                    init=init,  # type: ignore[arg-type]
+                    init=init,
                     output_dir=run_dir / "output",
                     pretrained_weights_path=pretrained,
-                    max_iter=max_iter,
+                    max_iter=params["max_iter"],
+                    checkpoint_period=params["checkpoint_period"],
+                    learning_rate=params["learning_rate"],
+                    ims_per_batch=params["ims_per_batch"],
                     model=record.model or DEFAULT_MODEL,
+                    should_stop=stop_event.is_set,
                 ),
                 on_progress=on_progress,
             )
-            dest = record.weights_dir / result.checkpoint_path.name
-            shutil.copy2(result.checkpoint_path, dest)
+            published = []
+            for path in list(result.checkpoints) + [result.checkpoint_path]:
+                copied = self._publish_checkpoint(record.weights_dir, path)
+                if copied is not None:
+                    published.append(copied.name)
+            dest = self._publish_checkpoint(record.weights_dir, result.checkpoint_path)
             current = _read_json(status_path)
-            current["status"] = "completed"
+            current["status"] = "stopped" if result.stopped else "completed"
             current["progress"] = 1.0
-            current["message"] = "Training complete"
+            if result.stopped:
+                name = dest.name if dest is not None else "no checkpoint"
+                current["message"] = f"Stopped at iteration {result.iteration}. Saved {name}."
+            else:
+                current["message"] = "Training complete"
             current["finished_at"] = _now()
+            current["iteration"] = result.iteration
+            current["checkpoints"] = list(dict.fromkeys(published))
             current["result"] = {
-                "checkpoint": str(dest),
+                "checkpoint": str(dest) if dest is not None else None,
                 "run_checkpoint": str(result.checkpoint_path),
                 "metrics": str(result.metrics_path),
+                "stopped": result.stopped,
+                "iteration": result.iteration,
             }
             self._write_status(run_dir, current)
+            _append_line(run_dir / "train.log", current["message"])
         except Exception as exc:
             current = _read_json(status_path)
             current["status"] = "failed"
@@ -177,6 +288,7 @@ class JobRunner:
             current["error"] = str(exc)
             current["finished_at"] = _now()
             self._write_status(run_dir, current)
+            _append_line(run_dir / "train.log", f"Training failed: {exc}")
 
     def _run_infer(
         self,
@@ -188,11 +300,13 @@ class JobRunner:
         record = self.store.get(project_id)
         status_path = run_dir / "status.json"
 
-        def on_progress(value: float, message: str) -> None:
+        def on_progress(value, message, **extra) -> None:
             current = _read_json(status_path)
             current["status"] = "running"
-            current["progress"] = value
-            current["message"] = message
+            if value is not None:
+                current["progress"] = value
+            if message:
+                current["message"] = message
             self._write_status(run_dir, current)
 
         try:
@@ -230,6 +344,18 @@ class JobRunner:
             current["finished_at"] = _now()
             self._write_status(run_dir, current)
 
+    def _publish_checkpoint(self, weights_dir: Path, source: Path | None) -> Path | None:
+        if source is None:
+            return None
+        path = Path(source)
+        if not path.is_file():
+            return None
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        dest = weights_dir / path.name
+        if dest.resolve() != path.resolve():
+            shutil.copy2(path, dest)
+        return dest
+
     def _resolve_checkpoint(
         self,
         weights_dir: Path,
@@ -248,6 +374,9 @@ class JobRunner:
             files = [path for path in files if path.suffix.lower() in {".pth", ".pkl"}]
         elif engine_name == "stub":
             files = [path for path in files if path.suffix.lower() == ".json"]
+        numbered = [path for path in files if path.name.startswith("model_") and path.name[6:10].isdigit()]
+        if numbered:
+            files = numbered
         if not files:
             raise FileNotFoundError("No checkpoint in the project weights folder. Train first.")
         return files[-1]
@@ -263,10 +392,13 @@ class JobRunner:
         return run_dir
 
     def _write_status(self, run_dir: Path, payload: dict) -> dict:
+        with self._lock:
+            return self._write_status_locked(run_dir, payload)
+
+    def _write_status_locked(self, run_dir: Path, payload: dict) -> dict:
         path = run_dir / "status.json"
         _write_json_atomic(path, payload)
-        with self._lock:
-            self._jobs[payload["id"]] = path
+        self._jobs[payload["id"]] = path
         return payload
 
     def _find_status(self, job_id: str) -> Path | None:
@@ -281,10 +413,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _write_json_atomic(path: Path, payload: dict) -> None:
-    tmp = path.with_name(path.name + ".tmp")
+def _write_json_atomic(path: Path, payload: dict) -> dict:
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+    return payload
 
 
 def _read_json(path: Path) -> dict:
@@ -300,3 +433,39 @@ def _read_json(path: Path) -> dict:
     if last_error:
         raise last_error
     raise json.JSONDecodeError("Expecting value", "", 0)
+
+
+def _append_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line.rstrip() + "\n")
+
+
+def _append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            rows.append(json.loads(text))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def _tail_lines(path: Path, limit: int) -> list[str]:
+    if not path.is_file():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if limit < 1:
+        return lines
+    return lines[-limit:]
