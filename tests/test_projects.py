@@ -3,6 +3,7 @@ import json
 
 from PIL import Image
 
+from core.jobs import JobRunner, _backend_options_for_checkpoint
 from core.projects import ProjectStore
 
 
@@ -46,6 +47,15 @@ def test_delete_project_removes_folder(tmp_path: Path) -> None:
     assert listed == []
 
 
+def test_update_model_persists(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("Cards", ["Loop-A"], engine="detectron2")
+    updated = store.update_model(record.id, "mask_rcnn_r101_fpn")
+    assert updated.model == "mask_rcnn_r101_fpn"
+    reloaded = store.get(record.id)
+    assert reloaded.model == "mask_rcnn_r101_fpn"
+
+
 def test_legacy_project_json_gets_default_model(tmp_path: Path) -> None:
     store = ProjectStore(tmp_path)
     record = store.create("Legacy", ["Loop-A"], engine="stub")
@@ -55,3 +65,19 @@ def test_legacy_project_json_gets_default_model(tmp_path: Path) -> None:
     loaded = store.get(record.id)
     assert loaded.engine == "stub"
     assert loaded.model == "mask_rcnn_r50_fpn"
+
+
+def test_publish_checkpoint_copies_vitdet_backend_sidecar(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "projects")
+    runner = JobRunner(store, tmp_path / "weights")
+    run_output = tmp_path / "run-output"
+    run_output.mkdir()
+    checkpoint = run_output / "model_0003.pth"
+    checkpoint.write_bytes(b"weights")
+    (run_output / "backend.json").write_text(json.dumps({"input_size": 256, "square_pad": 256}), encoding="utf-8")
+    dest_dir = tmp_path / "project-weights"
+    published = runner._publish_checkpoint(dest_dir, checkpoint)
+    assert published == dest_dir / "model_0003.pth"
+    sidecar = dest_dir / "model_0003.backend.json"
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["input_size"] == 256
+    assert _backend_options_for_checkpoint(published) == {"min_size": 256}

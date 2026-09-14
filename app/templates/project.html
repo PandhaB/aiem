@@ -55,7 +55,15 @@
     <tbody>
       {% for run in runs %}
       <tr>
-        <td><code>{{ run.id }}</code></td>
+        <td>
+          {% if run.status in ["queued", "running"] and run.kind == "train" %}
+          <a href="/projects/{{ project.id }}/train"><code>{{ run.id }}</code></a>
+          {% elif run.status in ["queued", "running"] and run.kind == "infer" %}
+          <a href="/projects/{{ project.id }}/infer"><code>{{ run.id }}</code></a>
+          {% else %}
+          <code>{{ run.id }}</code>
+          {% endif %}
+        </td>
         <td>{{ run.kind }}</td>
         <td>{{ run.status }}</td>
         <td>{{ run.message }}</td>

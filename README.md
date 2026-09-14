@@ -16,7 +16,16 @@ If your user id is 1000 (common on a personal Ubuntu machine), you can omit `HOS
 
 The image is large (PyTorch + CUDA + Detectron2, several gigabytes). The first `--build` takes a while. Public pretrained weights are **not** in the image; they are downloaded into `weights/` on first pretrained training.
 
-GPU training needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host. If Compose fails with a nvidia device-driver error, comment out the `deploy:` block in `Docker/docker-compose.yml`. The app still runs, on CPU, and the UI warns that a GPU is recommended.
+After the image exists locally, start with `up` **without** `--build` so Compose does not talk to Docker Hub. Compose is set to `pull_policy: missing` and `build.pull: false`. If you must rebuild while offline:
+
+```bash
+docker compose -f Docker/docker-compose.yml build --pull never
+HOST_UID="$(id -u)" HOST_GID="$(id -g)" docker compose -f Docker/docker-compose.yml up
+```
+
+GPU training needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host. Host `nvidia-smi` is not enough: PyTorch inside the container must see the GPU. This Compose file uses `runtime: nvidia` for that. Recreate the container after changing it (`up -d`, no rebuild).
+
+If `up` fails with **Driver Not Loaded** / NVML / CDI, Compose is fine — the NVIDIA kernel module is not loaded. On a laptop that is often `prime-select` set to `intel` (iGPU only). Check with `nvidia-smi`. Switch back with `sudo prime-select nvidia` then reboot, or comment out `runtime:` and the `deploy:` block in `Docker/docker-compose.yml` to start on CPU. The UI then warns that a GPU is recommended.
 
 ## What `docker compose` is doing
 
@@ -64,7 +73,7 @@ docker compose -f Docker/docker-compose.yml down    # stop and remove the contai
 | `projects/`      | Your projects (host folder, mounted into the container)                              |
 | `weights/`       | Downloaded model weight files (host folder, **not** baked into the Docker image)     |
 
-The default training backend is **Detectron2** with Mask R-CNN R50-FPN. The **stub** remains available for demos without a GPU: it writes dummy checkpoints, COCO, masks, and overlays.
+The default training backend is **Detectron2**. Curated instance cards: Mask R-CNN R50-FPN (default), R101-FPN, X101-FPN, and ViTDet Mask R-CNN ViT-B. ViTDet follows the native tile size (capped at 1024 px); set min size to 1024 only if you want the COCO recipe. The **stub** remains available for demos without a GPU: it writes dummy checkpoints, COCO, masks, and overlays.
 
 ## Checks (tests)
 
@@ -90,7 +99,7 @@ docker compose -f Docker/docker-compose.yml exec app pytest -q
 Files, in plain language:
 
 - **Engine** (`tests/test_engine_stub.py`) — the fake backend still produces a checkpoint, a COCO file, mask images and a colour overlay.
-- **Catalogue** (`tests/test_catalog.py`) — the v1.1 model id is R50-FPN; Detectron2 refuses a stub JSON checkpoint.
+- **Catalogue** (`tests/test_catalog.py`) — default model id is R50-FPN; R101, X101 and ViTDet-B are listed; Detectron2 refuses a stub JSON checkpoint.
 - **COCO** (`tests/test_coco.py`) — a polygon JSON can be saved and opened again without losing classes or vertices.
 - **Project folder** (`tests/test_projects.py`) — creating (and deleting) a project still builds the expected folders on disk.
 - **Web API** (`tests/test_api.py`) — the same path a browser uses: create, upload, annotate, train, infer, download, delete (stub engine).

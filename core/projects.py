@@ -160,6 +160,15 @@ class ProjectStore:
         (record.root / "project.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return record
 
+    def update_model(self, project_id: str, model: str) -> ProjectRecord:
+        record = self.get(project_id)
+        model_spec = get_model(model)
+        if record.engine == "detectron2" and model_spec.engine != "detectron2":
+            raise ValueError(f"Model {model_spec.id} does not belong to Detectron2.")
+        record.model = model_spec.id
+        (record.root / "project.json").write_text(json.dumps(record.to_dict(), indent=2), encoding="utf-8")
+        return record
+
     def add_image(self, project_id: str, filename: str, data: bytes) -> dict:
         record = self.get(project_id)
         safe_name = Path(filename).name

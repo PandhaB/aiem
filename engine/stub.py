@@ -52,21 +52,24 @@ class StubEngine:
 
         request.output_dir.mkdir(parents=True, exist_ok=True)
         steps = max(1, request.max_iter or 4)
+        start_iter = max(0, request.start_iter)
         period = request.checkpoint_period
         started = time.monotonic()
         saved: list[Path] = []
         stopped = False
-        last_iter = steps
+        last_iter = start_iter + steps
 
         def maybe_stop(iteration: int) -> None:
             if request.should_stop is not None and request.should_stop():
                 raise TrainingStopped(iteration)
 
         try:
-            for iteration in range(1, steps + 1):
+            for local in range(1, steps + 1):
                 if request.should_stop is not None:
                     time.sleep(0.02)
-                decay = math.exp(-3.0 * iteration / steps)
+                iteration = start_iter + local
+                display_total = start_iter + steps
+                decay = math.exp(-3.0 * local / steps)
                 total_loss = 1.8 * decay + 0.15
                 metrics = {
                     "total_loss": total_loss,
@@ -74,27 +77,27 @@ class StubEngine:
                     "loss_cls": total_loss * 0.3,
                 }
                 elapsed = time.monotonic() - started
-                eta = (elapsed / iteration) * (steps - iteration) if iteration < steps else 0
-                eta_text = format_eta(eta) if iteration < steps else None
-                message = f"Training iteration {iteration}/{steps}"
+                eta = (elapsed / local) * (steps - local) if local < steps else 0
+                eta_text = format_eta(eta) if local < steps else None
+                message = f"Training iteration {iteration}/{display_total}"
                 if eta_text:
                     message += f" — ETA {eta_text}"
                 log_line = (
-                    f"iter: {iteration}/{steps}  total_loss: {total_loss:.4f}"
+                    f"iter: {iteration}/{display_total}  total_loss: {total_loss:.4f}"
                     + (f"  eta: {eta_text}" if eta_text else "")
                 )
                 checkpoint_path = None
-                if period is not None and iteration % period == 0:
+                if period is not None and local % period == 0:
                     checkpoint_path = _write_stub_checkpoint(request, coco, iteration)
                     saved.append(checkpoint_path)
                     log_line += f"  saved {checkpoint_path.name}"
                 self._report(
                     on_progress,
-                    0.1 + 0.85 * (iteration / steps),
+                    0.1 + 0.85 * (local / steps),
                     message,
                     log_line=log_line,
                     iteration=iteration,
-                    max_iter=steps,
+                    max_iter=display_total,
                     eta_seconds=eta,
                     metrics=metrics,
                     checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
@@ -176,6 +179,7 @@ class StubEngine:
                 overlay_colors=request.overlay_colors,
                 output_dir=request.output_dir,
                 class_names=request.class_names,
+                should_stop=request.should_stop,
             ),
             on_progress=on_progress,
         )
@@ -200,7 +204,14 @@ class StubEngine:
         for annotation in coco.get("annotations", []):
             anns_by_image.setdefault(annotation["image_id"], []).append(annotation)
 
-        for index, image_info in enumerate(coco.get("images", [])):
+        stopped = False
+        images = coco.get("images", [])
+        for index, image_info in enumerate(images):
+            if request.should_stop is not None:
+                time.sleep(0.02)
+                if request.should_stop():
+                    stopped = True
+                    break
             image_path = request.images_dir / image_info["file_name"]
             if not image_path.is_file():
                 raise FileNotFoundError(f"Image not found: {image_path}")
@@ -223,18 +234,26 @@ class StubEngine:
                 mask.save(masks_dir / f"{stem}_{instance_index:03d}.png")
             composed = Image.alpha_composite(image, overlay).convert("RGB")
             composed.save(overlay_dir / image_info["file_name"])
-            if coco.get("images"):
+            if images:
                 self._report(
                     on_progress,
-                    0.6 + 0.4 * ((index + 1) / len(coco["images"])),
+                    0.6 + 0.4 * ((index + 1) / len(images)),
                     f"Exported {image_info['file_name']}",
                 )
 
         coco_path = request.output_dir / PREDICTIONS_NAME
         if request.predictions_coco_path.resolve() != coco_path.resolve():
             coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
-        self._report(on_progress, 1.0, "Export complete")
-        return InferResult(coco_path=coco_path, overlay_dir=overlay_dir, masks_dir=masks_dir)
+        if stopped:
+            self._report(on_progress, 1.0, "Inference stopped")
+        else:
+            self._report(on_progress, 1.0, "Export complete")
+        return InferResult(
+            coco_path=coco_path,
+            overlay_dir=overlay_dir,
+            masks_dir=masks_dir,
+            stopped=stopped,
+        )
 
     @staticmethod
     def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:

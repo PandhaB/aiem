@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.coco import load_coco
 from core.jobs import JobError
-from engine.catalog import DEFAULT_ENGINE, DEFAULT_MODEL, describe_device, get_model
+from core.paths import list_image_folders
+from engine.catalog import DEFAULT_ENGINE, DEFAULT_MODEL, MODEL_ZOO_URL, describe_device, get_model
 from engine.registry import available_engines, available_models
 
 router = APIRouter(prefix="/api")
@@ -37,11 +39,17 @@ class TrainBody(BaseModel):
     checkpoint_period: int | None = Field(default=None, ge=1)
     learning_rate: float | None = Field(default=None, gt=0)
     ims_per_batch: int | None = Field(default=None, ge=1)
+    model: str | None = None
+    resume_run_id: str | None = None
+    resume_checkpoint: str | None = None
+    backend_options: dict = Field(default_factory=dict)
 
 
 class InferBody(BaseModel):
     overlay_colors: dict[str, str] = Field(default_factory=dict)
     checkpoint_name: str | None = None
+    source: str = "project"
+    relative_path: str | None = None
 
 
 class ImportDatasetBody(BaseModel):
@@ -76,8 +84,17 @@ def list_engines() -> dict:
 
 
 @router.get("/models")
-def list_models() -> dict:
-    return {"models": available_models(), "default": DEFAULT_MODEL}
+def list_models(engine: str | None = None) -> dict:
+    return {
+        "models": available_models(engine=engine),
+        "default": DEFAULT_MODEL,
+        "zoo_url": MODEL_ZOO_URL,
+    }
+
+
+@router.get("/datasets")
+def list_datasets(request: Request) -> dict:
+    return {"datasets": list_image_folders(_settings(request).datasets_dir)}
 
 
 @router.get("/status")
@@ -196,6 +213,10 @@ def start_train(request: Request, project_id: str, body: TrainBody) -> dict:
             checkpoint_period=body.checkpoint_period,
             learning_rate=body.learning_rate,
             ims_per_batch=body.ims_per_batch,
+            model=body.model,
+            resume_run_id=body.resume_run_id,
+            resume_checkpoint=body.resume_checkpoint,
+            backend_options=body.backend_options,
         )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -211,11 +232,45 @@ def start_infer(request: Request, project_id: str, body: InferBody) -> dict:
             project_id,
             overlay_colors=body.overlay_colors,
             checkpoint_name=body.checkpoint_name,
+            source=body.source,
+            relative_path=body.relative_path,
         )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except JobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/jobs/infer-upload")
+async def start_infer_upload(
+    request: Request,
+    project_id: str,
+    files: list[UploadFile] = File(...),
+    checkpoint_name: str | None = Form(None),
+    overlay_colors: str = Form("{}"),
+) -> dict:
+    _project_or_404(request, project_id)
+    try:
+        colors = json.loads(overlay_colors) if overlay_colors else {}
+        if not isinstance(colors, dict):
+            raise ValueError("overlay_colors must be a JSON object.")
+        uploaded = [(upload.filename or "image.png", await upload.read()) for upload in files]
+        return _jobs(request).start_infer(
+            project_id,
+            overlay_colors=colors,
+            checkpoint_name=checkpoint_name,
+            source="upload",
+            uploaded_files=uploaded,
+        )
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except JobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/jobs/active")
+def active_job(request: Request) -> dict:
+    return {"job": _jobs(request).active()}
 
 
 @router.get("/jobs/{job_id}")

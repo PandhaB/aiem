@@ -1,13 +1,21 @@
 # One service: web UI + Detectron2 jobs.
 # Weight files stay on the host (weights/, projects/*/weights/). They are never baked into the image.
-# GPU: NVIDIA Container Toolkit on the host. If `up` fails with a nvidia device-driver error,
-# comment out the `deploy:` block below — the app then runs on CPU (slow, a warning is shown in the UI).
+# GPU: NVIDIA Container Toolkit on the host. `runtime: nvidia` is required on some
+# machines (the Compose `deploy.devices` / `--gpus` path can fail NVML even when
+# host nvidia-smi works).
+#
+# If `up` fails with NVML / "Driver Not Loaded" / CDI errors, the host driver is
+# missing — often `prime-select` is on intel after suspend. Check with `nvidia-smi`.
+# To start on CPU, comment out `runtime:` and the `deploy:` block.
 
 services:
   app:
+    pull_policy: missing
+    runtime: nvidia
     build:
       context: ..
       dockerfile: Docker/Dockerfile
+      pull: false
     ports:
       - "8000:8000"
     volumes:

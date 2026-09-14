@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import time
 from pathlib import Path
@@ -32,6 +33,33 @@ from engine.training import (
 
 CHECKPOINT_SUFFIX = ".pth"
 PREDICTIONS_NAME = "predictions.json"
+VITDET_PATCH = 16
+VITDET_DEFAULT_CANVAS = 1024
+BACKEND_META_NAME = "backend.json"
+
+
+def vitdet_canvas_size(
+    min_size: int | None = None,
+    image_sizes: list[tuple[int, int]] | None = None,
+) -> int:
+    """Square input canvas for ViTDet. COCO weights use 1024; small TEM tiles need not be upscaled.
+
+    The ViT still loads 1024-px relative-position tables. ``square_pad`` and the resize
+    follow this canvas so a 256 px tile is not padded to 1024 (which blows GPU memory).
+    """
+    if min_size:
+        raw = int(min_size)
+        if raw < VITDET_PATCH:
+            raise ValueError(f"ViTDet min_size must be at least {VITDET_PATCH} (patch size).")
+        return _round_up_to_patch(raw)
+    if image_sizes:
+        longest = max(max(width, height) for width, height in image_sizes)
+        return min(VITDET_DEFAULT_CANVAS, _round_up_to_patch(longest))
+    return VITDET_DEFAULT_CANVAS
+
+
+def _round_up_to_patch(value: int) -> int:
+    return max(VITDET_PATCH, math.ceil(value / VITDET_PATCH) * VITDET_PATCH)
 
 
 class Detectron2Engine:
@@ -73,29 +101,41 @@ class Detectron2Engine:
         )
         max_iter = request.max_iter or 300
         stopped = False
-        last_iter = max_iter
+        last_iter = request.start_iter + max_iter
         named_checkpoint: Path | None = None
         log_handler = None
         try:
-            cfg = _build_train_cfg(
-                detectron2,
-                torch,
-                spec.detectron2_config,
-                dataset_name,
-                n_classes=len(request.class_names),
-                init=request.init,
-                weights_path=request.pretrained_weights_path,
-                max_iter=max_iter,
-                output_dir=request.output_dir,
-                learning_rate=request.learning_rate,
-                ims_per_batch=request.ims_per_batch,
-            )
-            trainer = _ProgressTrainer(
-                cfg,
-                on_progress,
-                should_stop=request.should_stop,
-                checkpoint_period=request.checkpoint_period,
-            )
+            if spec.config_kind == "lazy":
+                trainer = _build_lazy_trainer(
+                    torch,
+                    spec,
+                    dataset_name,
+                    n_classes=len(request.class_names),
+                    request=request,
+                    on_progress=on_progress,
+                )
+            else:
+                cfg = _build_train_cfg(
+                    detectron2,
+                    torch,
+                    spec.detectron2_config,
+                    dataset_name,
+                    n_classes=len(request.class_names),
+                    init=request.init,
+                    weights_path=request.pretrained_weights_path,
+                    max_iter=max_iter,
+                    output_dir=request.output_dir,
+                    learning_rate=request.learning_rate,
+                    ims_per_batch=request.ims_per_batch,
+                    backend_options=request.backend_options,
+                )
+                trainer = _ProgressTrainer(
+                    cfg,
+                    on_progress,
+                    should_stop=request.should_stop,
+                    checkpoint_period=request.checkpoint_period,
+                    start_iter=request.start_iter,
+                )
             log_handler = _install_log_handler(on_progress)
             trainer.resume_or_load(resume=False)
             self._report(on_progress, 0.12, "Starting Detectron2 training", log_line="Starting Detectron2 training")
@@ -116,27 +156,25 @@ class Detectron2Engine:
             raise FileNotFoundError(
                 f"Detectron2 did not write {checkpoint_filename(last_iter, CHECKPOINT_SUFFIX)}"
             )
+        metrics = {
+            "engine": self.name(),
+            "model": spec.id,
+            "init": request.init,
+            "max_iter": max_iter,
+            "iteration": last_iter,
+            "stopped": stopped,
+            "learning_rate": request.learning_rate or default_learning_rate(request.init),
+            "ims_per_batch": request.ims_per_batch or 1,
+            "checkpoint_period": request.checkpoint_period,
+            "device": device_info["device"],
+            "cuda": device_info["cuda"],
+            "num_classes": len(request.class_names),
+        }
+        backend_meta = _read_backend_meta(request.output_dir)
+        if backend_meta:
+            metrics.update(backend_meta)
         metrics_path = request.output_dir / "metrics.json"
-        metrics_path.write_text(
-            json.dumps(
-                {
-                    "engine": self.name(),
-                    "model": spec.id,
-                    "init": request.init,
-                    "max_iter": max_iter,
-                    "iteration": last_iter,
-                    "stopped": stopped,
-                    "learning_rate": request.learning_rate or default_learning_rate(request.init),
-                    "ims_per_batch": request.ims_per_batch or 1,
-                    "checkpoint_period": request.checkpoint_period,
-                    "device": device_info["device"],
-                    "cuda": device_info["cuda"],
-                    "num_classes": len(request.class_names),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         if stopped:
             self._report(
                 on_progress,
@@ -183,14 +221,33 @@ class Detectron2Engine:
         if not image_paths:
             raise FileNotFoundError(f"No images found in {request.images_dir}")
 
-        cfg = _build_infer_cfg(
-            detectron2,
-            torch,
-            spec.detectron2_config,
-            n_classes=len(request.class_names),
-            checkpoint_path=request.checkpoint_path,
-        )
-        predictor = detectron2.engine.DefaultPredictor(cfg)
+        if spec.config_kind == "lazy":
+            canvas = vitdet_canvas_size(
+                (request.backend_options or {}).get("min_size"),
+                _image_hw(request.images_dir),
+            )
+            self._report(
+                on_progress,
+                0.06,
+                f"ViTDet input canvas: {canvas} px",
+                log_line=f"ViTDet input canvas: {canvas} px",
+            )
+            predictor = _LazyPredictor(
+                spec,
+                n_classes=len(request.class_names),
+                checkpoint_path=request.checkpoint_path,
+                torch=_torch(),
+                canvas=canvas,
+            )
+        else:
+            cfg = _build_infer_cfg(
+                detectron2,
+                torch,
+                spec.detectron2_config,
+                n_classes=len(request.class_names),
+                checkpoint_path=request.checkpoint_path,
+            )
+            predictor = detectron2.engine.DefaultPredictor(cfg)
         request.output_dir.mkdir(parents=True, exist_ok=True)
         coco = {
             "info": {"description": "Detectron2 instance-segmentation predictions", "version": "0.1"},
@@ -202,7 +259,11 @@ class Detectron2Engine:
             ],
         }
         next_ann = 1
+        stopped = False
         for image_id, image_path in enumerate(image_paths, start=1):
+            if request.should_stop is not None and request.should_stop():
+                stopped = True
+                break
             bgr = detectron2.data.detection_utils.read_image(str(image_path), format="BGR")
             height, width = bgr.shape[:2]
             coco["images"].append(
@@ -242,16 +303,19 @@ class Detectron2Engine:
 
         coco_path = request.output_dir / PREDICTIONS_NAME
         coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
-        return self.export_predictions(
+        result = self.export_predictions(
             ExportRequest(
                 predictions_coco_path=coco_path,
                 images_dir=request.images_dir,
                 overlay_colors=request.overlay_colors,
                 output_dir=request.output_dir,
                 class_names=request.class_names,
+                should_stop=request.should_stop,
             ),
             on_progress=on_progress,
         )
+        result.stopped = stopped or result.stopped
+        return result
 
     def export_predictions(
         self,
@@ -270,8 +334,12 @@ class Detectron2Engine:
         for annotation in coco.get("annotations", []):
             anns_by_image.setdefault(annotation["image_id"], []).append(annotation)
 
+        stopped = False
         images = coco.get("images", [])
         for index, image_info in enumerate(images):
+            if request.should_stop is not None and request.should_stop():
+                stopped = True
+                break
             image_path = request.images_dir / image_info["file_name"]
             if not image_path.is_file():
                 raise FileNotFoundError(f"Image not found: {image_path}")
@@ -301,8 +369,16 @@ class Detectron2Engine:
         coco_path = request.output_dir / PREDICTIONS_NAME
         if request.predictions_coco_path.resolve() != coco_path.resolve():
             coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
-        self._report(on_progress, 1.0, "Export complete")
-        return InferResult(coco_path=coco_path, overlay_dir=overlay_dir, masks_dir=masks_dir)
+        if stopped:
+            self._report(on_progress, 1.0, "Inference stopped")
+        else:
+            self._report(on_progress, 1.0, "Export complete")
+        return InferResult(
+            coco_path=coco_path,
+            overlay_dir=overlay_dir,
+            masks_dir=masks_dir,
+            stopped=stopped,
+        )
 
     @staticmethod
     def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:
@@ -351,6 +427,138 @@ def _torch():
     return torch
 
 
+def _build_lazy_trainer(torch, spec, dataset_name: str, n_classes: int, request: TrainRequest, on_progress):
+    """ViTDet and other LazyConfig cards. Same job contract as the YAML Mask R-CNN path."""
+    from functools import partial
+
+    from detectron2 import model_zoo
+    from detectron2.checkpoint import DetectionCheckpointer
+    from detectron2.config import instantiate
+    from detectron2.engine import AMPTrainer, HookBase, SimpleTrainer
+    from detectron2.modeling.backbone.vit import get_vit_lr_decay_rate
+
+    max_iter = request.max_iter or 300
+    canvas = vitdet_canvas_size(
+        (request.backend_options or {}).get("min_size"),
+        _image_hw(request.images_dir, request.annotations_path),
+    )
+    model_cfg = model_zoo.get_config(spec.detectron2_config).model
+    model_cfg.roi_heads.num_classes = n_classes
+    model_cfg.backbone.square_pad = canvas
+    model = instantiate(model_cfg)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    dataloader_cfg = model_zoo.get_config("common/data/coco.py").dataloader
+    dataloader_cfg.train.dataset.names = dataset_name
+    dataloader_cfg.train.total_batch_size = max(1, request.ims_per_batch or 1)
+    dataloader_cfg.train.num_workers = 0
+    dataloader_cfg.train.mapper.image_format = "RGB"
+    aug0 = dataloader_cfg.train.mapper.augmentations[0]
+    aug0.short_edge_length = (canvas,)
+    aug0.sample_style = "choice"
+    aug0.max_size = canvas
+    train_loader = instantiate(dataloader_cfg.train)
+    _write_backend_meta(
+        request.output_dir,
+        {
+            "family": spec.family,
+            "input_size": canvas,
+            "img_size": VITDET_DEFAULT_CANVAS,
+            "square_pad": canvas,
+        },
+    )
+    if on_progress is not None:
+        on_progress(
+            0.1,
+            f"ViTDet input canvas: {canvas} px",
+            log_line=(
+                f"ViTDet input canvas: {canvas} px "
+                f"(native tiles are not upscaled to {VITDET_DEFAULT_CANVAS} unless you set min size)"
+            ),
+        )
+
+    optimizer_cfg = model_zoo.get_config("common/optim.py").AdamW
+    optimizer_cfg.params.lr_factor_func = partial(get_vit_lr_decay_rate, num_layers=12, lr_decay_rate=0.7)
+    optimizer_cfg.params.overrides = {"pos_embed": {"weight_decay": 0.0}}
+    optimizer_cfg.lr = (
+        float(request.learning_rate)
+        if request.learning_rate is not None
+        else (spec.default_lr or default_learning_rate(request.init))
+    )
+    optimizer_cfg.params.model = model
+    optim = instantiate(optimizer_cfg)
+
+    inner = AMPTrainer(model, train_loader, optim) if device == "cuda" else SimpleTrainer(model, train_loader, optim)
+    checkpointer = DetectionCheckpointer(model, str(request.output_dir), trainer=inner)
+    inner.checkpointer = checkpointer
+    inner.cfg = type("Cfg", (), {"OUTPUT_DIR": str(request.output_dir)})()
+    if request.init in {"pretrained", "checkpoint"}:
+        if request.pretrained_weights_path is None or not Path(request.pretrained_weights_path).is_file():
+            raise FileNotFoundError(
+                "Weights were not found. Use public pretrained weights, or choose a previous checkpoint."
+            )
+        checkpointer.load(str(request.pretrained_weights_path))
+    inner.register_hooks(
+        [
+            _ProgressHook(
+                HookBase,
+                on_progress,
+                request.should_stop,
+                request.checkpoint_period,
+                time.monotonic(),
+                request.start_iter,
+            )
+        ]
+    )
+    return _LazyProgressTrainer(inner, max_iter)
+
+
+class _LazyProgressTrainer:
+    def __init__(self, trainer, max_iter: int) -> None:
+        self._trainer = trainer
+        self._max_iter = max_iter
+
+    def resume_or_load(self, resume: bool) -> None:
+        return None
+
+    def train(self) -> None:
+        self._trainer.train(0, self._max_iter)
+
+
+class _LazyPredictor:
+    """Single-image inference for LazyConfig models (ViTDet). DefaultPredictor is YAML-only."""
+
+    def __init__(self, spec, n_classes: int, checkpoint_path: Path, torch, canvas: int = VITDET_DEFAULT_CANVAS) -> None:
+        from detectron2 import model_zoo
+        from detectron2.checkpoint import DetectionCheckpointer
+        from detectron2.config import instantiate
+        import detectron2.data.transforms as T
+
+        model_cfg = model_zoo.get_config(spec.detectron2_config).model
+        model_cfg.roi_heads.num_classes = n_classes
+        model_cfg.backbone.square_pad = canvas
+        model = instantiate(model_cfg)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        model.eval()
+        DetectionCheckpointer(model).load(str(checkpoint_path))
+        box_predictor = getattr(model.roi_heads, "box_predictor", None)
+        if box_predictor is not None and hasattr(box_predictor, "test_score_thresh"):
+            box_predictor.test_score_thresh = 0.5
+        self.model = model
+        self.torch = torch
+        self.aug = T.ResizeShortestEdge(short_edge_length=canvas, max_size=canvas)
+
+    def __call__(self, original_bgr):
+        height, width = original_bgr.shape[:2]
+        image = original_bgr[:, :, ::-1]
+        image = self.aug.get_transform(image).apply_image(image)
+        tensor = self.torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+        with self.torch.no_grad():
+            return self.model([{"image": tensor, "height": height, "width": width}])[0]
+
+
 def _build_train_cfg(
     detectron2,
     torch,
@@ -363,6 +571,7 @@ def _build_train_cfg(
     output_dir: Path,
     learning_rate: float | None = None,
     ims_per_batch: int | None = None,
+    backend_options: dict | None = None,
 ):
     cfg = detectron2.get_cfg()
     cfg.merge_from_file(detectron2.model_zoo.get_config_file(config_name))
@@ -384,10 +593,10 @@ def _build_train_cfg(
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = n_classes
     cfg.OUTPUT_DIR = str(output_dir)
-    if init == "pretrained":
+    if init in {"pretrained", "checkpoint"}:
         if weights_path is None or not Path(weights_path).is_file():
             raise FileNotFoundError(
-                "Pretrained weights were not found. They should be downloaded into the weights/ volume."
+                "Weights were not found. Use public pretrained weights, or choose a previous checkpoint."
             )
         cfg.MODEL.WEIGHTS = str(weights_path)
     else:
@@ -399,7 +608,25 @@ def _build_train_cfg(
             cfg.SOLVER.BASE_LR = default_learning_rate("random")
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.INPUT.MASK_FORMAT = "polygon"
+    _apply_mask_rcnn_options(cfg, backend_options or {})
     return cfg
+
+
+def _apply_mask_rcnn_options(cfg, options: dict) -> None:
+    sizes = options.get("anchor_sizes")
+    if sizes:
+        values = [int(item) for item in sizes]
+        cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[value] for value in values]
+    ratios = options.get("anchor_aspect_ratios")
+    if ratios:
+        cfg.MODEL.ANCHOR_GENERATOR.ASPECT_RATIOS = [[float(item) for item in ratios]]
+    min_size = options.get("min_size")
+    if min_size:
+        size = int(min_size)
+        cfg.INPUT.MIN_SIZE_TRAIN = (size,)
+        cfg.INPUT.MIN_SIZE_TEST = size
+        cfg.INPUT.MAX_SIZE_TRAIN = max(int(cfg.INPUT.MAX_SIZE_TRAIN), size * 2)
+        cfg.INPUT.MAX_SIZE_TEST = max(int(cfg.INPUT.MAX_SIZE_TEST), size * 2)
 
 
 def _build_infer_cfg(detectron2, torch, config_name: str, n_classes: int, checkpoint_path: Path):
@@ -422,6 +649,7 @@ class _ProgressTrainer:
         on_progress: ProgressCallback | None,
         should_stop=None,
         checkpoint_period: int | None = None,
+        start_iter: int = 0,
     ) -> None:
         detectron2 = _detectron2()
         started_at = time.monotonic()
@@ -436,6 +664,7 @@ class _ProgressTrainer:
                         should_stop,
                         checkpoint_period,
                         started_at,
+                        start_iter,
                     )
                 )
                 return built
@@ -449,25 +678,27 @@ class _ProgressTrainer:
         self._trainer.train()
 
 
-def _ProgressHook(hook_base, on_progress, should_stop, checkpoint_period, started_at):
+def _ProgressHook(hook_base, on_progress, should_stop, checkpoint_period, started_at, start_iter=0):
     class ProgressHook(hook_base):
         def after_step(self):
-            current = self.trainer.iter + 1
-            total = max(self.trainer.max_iter, 1)
+            local = self.trainer.iter + 1
+            job_total = max(self.trainer.max_iter, 1)
+            current = start_iter + local
+            display_total = start_iter + job_total
             elapsed = time.monotonic() - started_at
-            eta = (elapsed / current) * (total - current) if current >= 2 else None
+            eta = (elapsed / local) * (job_total - local) if local >= 2 else None
             eta_text = format_eta(eta)
-            message = f"Training iteration {current}/{total}"
+            message = f"Training iteration {current}/{display_total}"
             if eta_text:
                 message += f" — ETA {eta_text}"
             metrics = _metrics_from_trainer(self.trainer)
-            log_line = f"iter: {current}/{total}"
+            log_line = f"iter: {current}/{display_total}"
             if "total_loss" in metrics:
                 log_line += f"  total_loss: {metrics['total_loss']:.4f}"
             if eta_text:
                 log_line += f"  eta: {eta_text}"
             saved = None
-            if checkpoint_period and current % checkpoint_period == 0:
+            if checkpoint_period and local % checkpoint_period == 0:
                 saved = _save_named_checkpoint(self.trainer, current)
                 log_line += f"  saved {saved.name}"
             stopped = should_stop is not None and should_stop()
@@ -476,11 +707,11 @@ def _ProgressHook(hook_base, on_progress, should_stop, checkpoint_period, starte
                 log_line += f"  saved {saved.name}"
             if on_progress is not None:
                 on_progress(
-                    0.12 + 0.85 * (current / total),
+                    0.12 + 0.85 * (local / job_total),
                     message,
                     log_line=log_line,
                     iteration=current,
-                    max_iter=total,
+                    max_iter=display_total,
                     eta_seconds=eta,
                     metrics=metrics or None,
                     checkpoint_path=str(saved) if saved else None,
@@ -491,15 +722,16 @@ def _ProgressHook(hook_base, on_progress, should_stop, checkpoint_period, starte
         def after_train(self):
             if should_stop is not None and should_stop():
                 return
-            current = max(int(getattr(self.trainer, "iter", 0)), self.trainer.max_iter)
+            local = max(int(getattr(self.trainer, "iter", 0)), self.trainer.max_iter)
+            current = start_iter + local
             saved = _save_named_checkpoint(self.trainer, current)
             if on_progress is not None:
                 on_progress(
                     0.97,
-                    f"Training iteration {current}/{max(self.trainer.max_iter, 1)}",
+                    f"Training iteration {current}/{start_iter + max(self.trainer.max_iter, 1)}",
                     log_line=f"Saved {saved.name}",
                     iteration=current,
-                    max_iter=max(self.trainer.max_iter, 1),
+                    max_iter=start_iter + max(self.trainer.max_iter, 1),
                     checkpoint_path=str(saved),
                 )
 
@@ -520,7 +752,8 @@ def _metrics_from_trainer(trainer) -> dict[str, float]:
 def _save_named_checkpoint(trainer, iteration: int) -> Path:
     stem = checkpoint_filename(iteration, CHECKPOINT_SUFFIX).removesuffix(CHECKPOINT_SUFFIX)
     trainer.checkpointer.save(stem)
-    return Path(trainer.cfg.OUTPUT_DIR) / f"{stem}{CHECKPOINT_SUFFIX}"
+    output_dir = getattr(getattr(trainer, "cfg", None), "OUTPUT_DIR", None) or trainer.checkpointer.save_dir
+    return Path(output_dir) / f"{stem}{CHECKPOINT_SUFFIX}"
 
 
 def _ensure_named_checkpoint(output_dir: Path, iteration: int) -> Path:
@@ -592,6 +825,45 @@ def _list_images(images_dir: Path) -> list[Path]:
         for path in images_dir.iterdir()
         if path.is_file() and path.suffix.lower() in suffixes
     )
+
+
+def _image_hw(images_dir: Path, annotations_path: Path | None = None) -> list[tuple[int, int]]:
+    sizes: list[tuple[int, int]] = []
+    if annotations_path is not None and annotations_path.is_file():
+        try:
+            coco = json.loads(annotations_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            coco = {}
+        for item in coco.get("images") or []:
+            width, height = item.get("width"), item.get("height")
+            if width and height:
+                sizes.append((int(width), int(height)))
+        if sizes:
+            return sizes
+    if not images_dir.is_dir():
+        return sizes
+    for path in _list_images(images_dir):
+        with Image.open(path) as image:
+            sizes.append(image.size)
+    return sizes
+
+
+def _write_backend_meta(output_dir: Path, payload: dict) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / BACKEND_META_NAME
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def _read_backend_meta(folder: Path) -> dict:
+    path = Path(folder) / BACKEND_META_NAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _mask_to_polygon(mask) -> list[float] | None:

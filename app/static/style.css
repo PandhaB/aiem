@@ -30,6 +30,19 @@ code, button, input, select, textarea {
 }
 .top a { color: inherit; text-decoration: none; }
 .brand { font-weight: 700; letter-spacing: 0.02em; }
+.job-banner {
+  background: #2a9d8f;
+  color: #fff;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 4px;
+  max-width: min(36rem, 62vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-banner:hover { text-decoration: underline; }
 .wrap { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 .hero p, .muted { color: var(--muted); }
 .crumb { font-size: 0.95rem; }
@@ -55,6 +68,17 @@ h1, h2 { font-weight: 600; margin: 0 0 0.5rem; }
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0.7rem;
 }
+.fold {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.55rem 0.8rem;
+  background: #fff;
+}
+.fold > summary {
+  cursor: pointer;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.fold .param-grid { margin-top: 0.7rem; }
 .train-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .terminal {
   background: #1c2430;

@@ -21,7 +21,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.state.settings = settings
     application.state.store = ProjectStore(settings.projects_dir)
-    application.state.jobs = JobRunner(application.state.store, settings.weights_dir)
+    application.state.jobs = JobRunner(
+        application.state.store,
+        settings.weights_dir,
+        datasets_dir=settings.datasets_dir,
+    )
 
     static_dir = Path(__file__).resolve().parent / "static"
     application.mount("/static", StaticFiles(directory=static_dir), name="static")

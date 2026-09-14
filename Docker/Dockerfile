@@ -23,6 +23,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
+# timm is required by Detectron2's ViT backbone (ViTDet), not a second engine.
 RUN pip install --no-cache-dir -r /app/requirements.txt \
     && pip install --no-cache-dir opencv-python-headless \
     && pip install --no-cache-dir "git+https://github.com/facebookresearch/detectron2.git"

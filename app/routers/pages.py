@@ -63,10 +63,21 @@ def train_page(request: Request, project_id: str):
         record = request.app.state.store.get(project_id)
     except FileNotFoundError:
         return RedirectResponse("/", status_code=302)
+    runs = request.app.state.store.list_runs(project_id)
+    train_runs = [
+        item
+        for item in runs
+        if item.get("kind") == "train" and item.get("status") in {"completed", "stopped"}
+    ]
     return templates.TemplateResponse(
         request,
         "train.html",
-        {"project": record, "device": describe_device()},
+        {
+            "project": record,
+            "device": describe_device(),
+            "train_runs": train_runs,
+            "checkpoints": request.app.state.store.list_checkpoints(project_id),
+        },
     )
 
 

@@ -39,7 +39,11 @@ class SegmentationEngine(Protocol):
         request: InferRequest,
         on_progress: ProgressCallback | None = None,
     ) -> InferResult:
-        """Run instance segmentation and write COCO + masks + colourised overlays."""
+        """Run instance segmentation and write COCO + masks + colourised overlays.
+
+        Backends that honour ``request.should_stop`` should return
+        ``InferResult(stopped=True)`` with whatever was already written.
+        """
 
     def load_checkpoint(self, path: Path) -> None:
         """Validate and load a checkpoint produced by this backend (or compatible)."""

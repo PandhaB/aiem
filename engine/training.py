@@ -32,6 +32,21 @@ def default_learning_rate(init: str) -> float:
     return 0.0001 if init == "random" else 0.00025
 
 
+def iteration_from_checkpoint_name(name: str) -> int | None:
+    stem = Path(name).name
+    if not stem.startswith("model_"):
+        return None
+    digits = ""
+    for char in stem[6:]:
+        if char.isdigit():
+            digits += char
+        else:
+            break
+    if not digits:
+        return None
+    return int(digits)
+
+
 def format_eta(seconds: float | None) -> str | None:
     if seconds is None:
         return None

@@ -7,6 +7,7 @@ from urllib.request import urlretrieve
 
 DEFAULT_MODEL = "mask_rcnn_r50_fpn"
 DEFAULT_ENGINE = "detectron2"
+MODEL_ZOO_URL = "https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md"
 
 
 @dataclass(frozen=True)
@@ -16,9 +17,13 @@ class ModelSpec:
     id: str
     label: str
     engine: str
+    family: str
+    task: str
     detectron2_config: str
     checkpoint_url: str
     checkpoint_filename: str
+    config_kind: str = "yaml"
+    default_lr: float | None = None
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -26,6 +31,8 @@ MODELS: dict[str, ModelSpec] = {
         id="mask_rcnn_r50_fpn",
         label="Mask R-CNN R50-FPN",
         engine="detectron2",
+        family="mask_rcnn",
+        task="instance",
         detectron2_config="COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml",
         checkpoint_url=(
             "https://dl.fbaipublicfiles.com/detectron2/"
@@ -34,11 +41,59 @@ MODELS: dict[str, ModelSpec] = {
         ),
         checkpoint_filename="mask_rcnn_r50_fpn.pkl",
     ),
+    "mask_rcnn_r101_fpn": ModelSpec(
+        id="mask_rcnn_r101_fpn",
+        label="Mask R-CNN R101-FPN",
+        engine="detectron2",
+        family="mask_rcnn",
+        task="instance",
+        detectron2_config="COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml",
+        checkpoint_url=(
+            "https://dl.fbaipublicfiles.com/detectron2/"
+            "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x/"
+            "138363263/model_final_a3ec54.pkl"
+        ),
+        checkpoint_filename="mask_rcnn_r101_fpn.pkl",
+    ),
+    "mask_rcnn_x101_fpn": ModelSpec(
+        id="mask_rcnn_x101_fpn",
+        label="Mask R-CNN X101-FPN",
+        engine="detectron2",
+        family="mask_rcnn",
+        task="instance",
+        detectron2_config="COCO-InstanceSegmentation/mask_rcnn_X_101_32x8d_FPN_3x.yaml",
+        checkpoint_url=(
+            "https://dl.fbaipublicfiles.com/detectron2/"
+            "COCO-InstanceSegmentation/mask_rcnn_X_101_32x8d_FPN_3x/"
+            "139653917/model_final_2d9806.pkl"
+        ),
+        checkpoint_filename="mask_rcnn_x101_fpn.pkl",
+    ),
+    "mask_rcnn_vitdet_b": ModelSpec(
+        id="mask_rcnn_vitdet_b",
+        label="ViTDet Mask R-CNN ViT-B",
+        engine="detectron2",
+        family="vitdet",
+        task="instance",
+        detectron2_config="common/models/mask_rcnn_vitdet.py",
+        checkpoint_url=(
+            "https://dl.fbaipublicfiles.com/detectron2/"
+            "ViTDet/COCO/mask_rcnn_vitdet_b/f325346929/model_final_61ccd1.pkl"
+        ),
+        checkpoint_filename="mask_rcnn_vitdet_b.pkl",
+        config_kind="lazy",
+        default_lr=0.0001,
+    ),
 }
 
 
-def list_models() -> list[ModelSpec]:
-    return [MODELS[key] for key in sorted(MODELS)]
+def list_models(engine: str | None = None, task: str | None = None) -> list[ModelSpec]:
+    items = list(MODELS.values())
+    if engine:
+        items = [item for item in items if item.engine == engine]
+    if task:
+        items = [item for item in items if item.task == task]
+    return items
 
 
 def get_model(model_id: str | None) -> ModelSpec:
@@ -52,7 +107,7 @@ def get_model(model_id: str | None) -> ModelSpec:
 
 def pretrained_path(weights_dir: Path, model_id: str | None = None) -> Path:
     spec = get_model(model_id)
-    return Path(weights_dir) / "detectron2" / spec.checkpoint_filename
+    return Path(weights_dir) / spec.engine / spec.checkpoint_filename
 
 
 def ensure_pretrained(
@@ -104,8 +159,8 @@ def describe_device() -> dict[str, object]:
         "message": (
             None
             if cuda
-            else "No GPU visible. Training will use CPU and will be slow. "
-            "Check nvidia-container-toolkit if you expected CUDA."
+            else "No GPU visible to this process. Host nvidia-smi is not enough: "
+            "the Compose container must see the GPU (NVIDIA Container Toolkit + runtime: nvidia)."
         ),
     }
 

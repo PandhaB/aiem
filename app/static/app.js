@@ -1,3 +1,47 @@
+window.jobPageUrl = function jobPageUrl(job) {
+  if (!job || !job.project_id) return "/";
+  if (job.kind === "train") return `/projects/${job.project_id}/train`;
+  if (job.kind === "infer") return `/projects/${job.project_id}/infer`;
+  return `/projects/${job.project_id}`;
+};
+
+window.fetchActiveJob = async function fetchActiveJob() {
+  const response = await fetch("/api/jobs/active");
+  if (!response.ok) return null;
+  const payload = await response.json();
+  return payload.job || null;
+};
+
+window.watchActiveJob = function watchActiveJob() {
+  const banner = document.getElementById("active-job-banner");
+  if (!banner) return;
+  const tick = async () => {
+    try {
+      const job = await window.fetchActiveJob();
+      const live = job && (job.status === "queued" || job.status === "running");
+      if (!live) {
+        banner.hidden = true;
+      } else {
+        const kind = job.kind === "infer" ? "Inference" : "Training";
+        const bits = [`${kind} running`];
+        if (job.kind === "train" && job.iteration != null && job.max_iter != null) {
+          bits.push(`${job.iteration}/${job.max_iter}`);
+        } else if (job.message) {
+          bits.push(job.message);
+        }
+        if (job.eta) bits.push(job.eta);
+        banner.textContent = bits.join(" · ");
+        banner.href = window.jobPageUrl(job);
+        banner.hidden = false;
+      }
+    } catch (err) {
+      banner.hidden = true;
+    }
+    window.setTimeout(tick, 2000);
+  };
+  tick();
+};
+
 window.pollJob = async function pollJob(jobId, ui) {
   ui.box.hidden = false;
   const tick = async () => {
@@ -115,3 +159,5 @@ window.drawLossCurves = function drawLossCurves(canvas, history) {
     ctx.stroke();
   });
 };
+
+window.watchActiveJob();

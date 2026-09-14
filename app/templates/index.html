@@ -19,7 +19,7 @@
       </label>
       <label>Engine
         <select name="engine">
-          <option value="detectron2" selected>Detectron2 (Mask R-CNN R50-FPN)</option>
+          <option value="detectron2" selected>Detectron2</option>
           <option value="stub">Stub (fake engine, no neural net)</option>
         </select>
       </label>
@@ -34,7 +34,7 @@
       {% for project in projects %}
       <li>
         <a href="/projects/{{ project.id }}">{{ project.name }}</a>
-        <span class="muted">{{ project.classes | map(attribute='name') | join(', ') }}</span>
+        <span class="muted">{{ project.engine }} · {{ project.model }} · {{ project.classes | map(attribute='name') | join(', ') }}</span>
       </li>
       {% endfor %}
     </ul>
@@ -51,10 +51,11 @@
     const form = event.target;
     const error = document.getElementById("create-error");
     const classes = form.classes.value.split(",").map((item) => item.trim()).filter(Boolean);
+    const body = { name: form.name.value, classes, engine: form.engine.value };
     const response = await fetch("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: form.name.value, classes, engine: form.engine.value, model: "mask_rcnn_r50_fpn" }),
+      body: JSON.stringify(body),
     });
     const payload = await response.json();
     if (!response.ok) {

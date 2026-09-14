@@ -78,6 +78,35 @@ def test_stub_train_and_infer_write_artifacts(tmp_path: Path) -> None:
     assert "segmentation" in coco_text
 
 
+def test_stub_resume_offsets_iterations(tmp_path: Path) -> None:
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    _write_png(images_dir / "tile.png")
+    annotations = tmp_path / "annotations.json"
+    _write_coco(annotations, "tile.png")
+    events = []
+
+    def on_progress(value, message, **extra):
+        events.append(extra)
+
+    engine = StubEngine()
+    result = engine.train(
+        TrainRequest(
+            images_dir=images_dir,
+            annotations_path=annotations,
+            class_names=["Loop-A"],
+            init="checkpoint",
+            output_dir=tmp_path / "train",
+            max_iter=2,
+            start_iter=10,
+        ),
+        on_progress=on_progress,
+    )
+    assert result.iteration == 12
+    assert result.checkpoint_path.name == "model_0012.stub.json"
+    assert [item.get("iteration") for item in events if item.get("iteration")][:2] == [11, 12]
+
+
 def test_stub_stop_and_periodic_checkpoints(tmp_path: Path) -> None:
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -112,3 +141,36 @@ def test_stub_stop_and_periodic_checkpoints(tmp_path: Path) -> None:
     assert (tmp_path / "train" / "model_0002.stub.json").is_file()
     assert any("Training iteration" in (message or "") for _, message, _ in events)
     assert any(item.get("metrics") for _, _, item in events)
+
+
+def test_stub_stop_infer(tmp_path: Path) -> None:
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    for index in range(8):
+        _write_png(images_dir / f"tile_{index}.png")
+    annotations = tmp_path / "annotations.json"
+    _write_coco(annotations, "tile_0.png")
+    checkpoint = tmp_path / "train" / "model_0001.stub.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text('{"engine": "stub"}', encoding="utf-8")
+    seen = {"n": 0}
+
+    def should_stop() -> bool:
+        seen["n"] += 1
+        return seen["n"] >= 3
+
+    engine = StubEngine()
+    result = engine.infer(
+        InferRequest(
+            images_dir=images_dir,
+            checkpoint_path=checkpoint,
+            class_names=["Loop-A"],
+            overlay_colors={"Loop-A": "#2a9d8f"},
+            output_dir=tmp_path / "infer",
+            should_stop=should_stop,
+        )
+    )
+    assert result.stopped is True
+    overlays = list((tmp_path / "infer" / "overlays").glob("*.png"))
+    assert overlays
+    assert len(overlays) < 8
