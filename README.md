@@ -67,13 +67,13 @@ docker compose -f Docker/docker-compose.yml down    # stop and remove the contai
 | Path             | Role                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `app/`           | Web server (FastAPI) and HTML/JS pages                                               |
-| `engine/`        | Training/inference contract and backends (`detectron2`, plus `stub` for demos)       |
+| `engine/`        | Training/inference contract and backends (`detectron2`, `ultralytics`, plus `stub` for demos) |
 | `core/`          | Projects on disk, COCO files, background jobs                                        |
 | `Datasets/DS-1/` | Dummy dataset (PNG tiles in `all/`, COCO in `train.json` / `val.json` / `test.json`) |
 | `projects/`      | Your projects (host folder, mounted into the container)                              |
 | `weights/`       | Downloaded model weight files (host folder, **not** baked into the Docker image)     |
 
-The default training backend is **Detectron2**. Curated instance cards: Mask R-CNN R50-FPN (default), R101-FPN, X101-FPN, and ViTDet Mask R-CNN ViT-B. ViTDet follows the native tile size (capped at 1024 px); set min size to 1024 only if you want the COCO recipe. The **stub** remains available for demos without a GPU: it writes dummy checkpoints, COCO, masks, and overlays.
+The default training backend is **Detectron2**. Curated instance cards: Mask R-CNN R50-FPN (default), R101-FPN, X101-FPN, and ViTDet Mask R-CNN ViT-B. ViTDet follows the native tile size (capped at 1024 px); set min size to 1024 only if you want the COCO recipe. A second engine, **Ultralytics**, adds YOLO-seg (YOLOv8n/s and YOLO11n/s). YOLO weights download into `weights/ultralytics/` on first pretrained training. Ultralytics may also store a tiny AMP probe file there (`yolo26n.pt`); that file is not the training model. After adding this engine, rebuild the image (`docker compose -f Docker/docker-compose.yml up --build`) so the `ultralytics` package is installed. The **stub** remains available for demos without a GPU: it writes dummy checkpoints, COCO, masks, and overlays.
 
 ## Checks (tests)
 
@@ -88,7 +88,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-Host pytest does not need Detectron2 or a GPU. The short Detectron2 smoke test is skipped unless CUDA and Detectron2 are both visible (typically inside Compose).
+Host pytest does not need Detectron2, Ultralytics, or a GPU. The short Detectron2 and Ultralytics smoke tests are skipped unless CUDA and the matching library are both visible (typically inside Compose).
 
 Inside a running Compose service:
 
@@ -99,11 +99,13 @@ docker compose -f Docker/docker-compose.yml exec app pytest -q
 Files, in plain language:
 
 - **Engine** (`tests/test_engine_stub.py`) — the fake backend still produces a checkpoint, a COCO file, mask images and a colour overlay.
-- **Catalogue** (`tests/test_catalog.py`) — default model id is R50-FPN; R101, X101 and ViTDet-B are listed; Detectron2 refuses a stub JSON checkpoint.
+- **Catalogue** (`tests/test_catalog.py`) — default Detectron2 model is R50-FPN; YOLO-seg cards are listed on the Ultralytics engine; Detectron2 refuses a stub JSON checkpoint.
+- **YOLO labels** (`tests/test_yolo_data.py`) — project COCO polygons are converted to Ultralytics `images/` + `labels/` + `data.yaml`.
 - **COCO** (`tests/test_coco.py`) — a polygon JSON can be saved and opened again without losing classes or vertices.
 - **Project folder** (`tests/test_projects.py`) — creating (and deleting) a project still builds the expected folders on disk.
 - **Web API** (`tests/test_api.py`) — the same path a browser uses: create, upload, annotate, train, infer, download, delete (stub engine).
 - **Detectron2 smoke** (`tests/test_detectron2_smoke.py`) — a few training iterations then infer, skipped without CUDA.
+- **Ultralytics smoke** (`tests/test_ultralytics_smoke.py`) — one YOLO-seg epoch then infer, skipped without CUDA.
 
 ## Data note
 

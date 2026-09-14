@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-from engine.catalog import DEFAULT_ENGINE, MODEL_ZOO_URL, detectron2_installed, list_models
+from engine.catalog import (
+    DEFAULT_ENGINE,
+    detectron2_installed,
+    engine_zoo_url,
+    list_models,
+    ultralytics_installed,
+)
 from engine.protocol import SegmentationEngine
 from engine.stub import StubEngine
 
 
 def available_engines() -> list[dict[str, object]]:
     d2 = detectron2_installed()
+    yolo = ultralytics_installed()
     return [
         {
             "name": "stub",
@@ -17,6 +24,11 @@ def available_engines() -> list[dict[str, object]]:
             "name": "detectron2",
             "available": d2,
             "label": "Detectron2" + ("" if d2 else " — not installed here"),
+        },
+        {
+            "name": "ultralytics",
+            "available": yolo,
+            "label": "Ultralytics YOLO" + ("" if yolo else " — not installed here"),
         },
     ]
 
@@ -36,8 +48,8 @@ def available_models(engine: str | None = None) -> list[dict[str, object]]:
     ]
 
 
-def model_zoo_url() -> str:
-    return MODEL_ZOO_URL
+def model_zoo_url(engine: str | None = None) -> str:
+    return engine_zoo_url(engine)
 
 
 def get_engine(name: str) -> SegmentationEngine:
@@ -48,4 +60,8 @@ def get_engine(name: str) -> SegmentationEngine:
         from engine.detectron2 import Detectron2Engine
 
         return Detectron2Engine()
-    raise KeyError(f"Unknown engine {key!r}. Known engines: detectron2, stub.")
+    if key == "ultralytics":
+        from engine.ultralytics import UltralyticsEngine
+
+        return UltralyticsEngine()
+    raise KeyError(f"Unknown engine {key!r}. Known engines: detectron2, ultralytics, stub.")

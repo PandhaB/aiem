@@ -10,6 +10,7 @@ from engine.catalog import (
     reject_incompatible_checkpoint,
 )
 from engine.detectron2 import Detectron2Engine
+from engine.ultralytics import UltralyticsEngine
 from engine.registry import available_models, get_engine
 
 
@@ -67,17 +68,41 @@ def test_list_models_keeps_catalogue_order() -> None:
 
 
 def test_available_models_are_instance_cards() -> None:
-    models = available_models()
-    assert {item["id"] for item in models} == {
+    d2 = available_models(engine="detectron2")
+    assert {item["id"] for item in d2} == {
         "mask_rcnn_r50_fpn",
         "mask_rcnn_r101_fpn",
         "mask_rcnn_x101_fpn",
         "mask_rcnn_vitdet_b",
     }
-    vitdet = next(item for item in models if item["id"] == "mask_rcnn_vitdet_b")
+    vitdet = next(item for item in d2 if item["id"] == "mask_rcnn_vitdet_b")
     assert vitdet["family"] == "vitdet"
     assert vitdet["config_kind"] == "lazy"
+    yolo = available_models(engine="ultralytics")
+    assert [item["id"] for item in yolo] == [
+        "yolov8n-seg",
+        "yolov8s-seg",
+        "yolo11n-seg",
+        "yolo11s-seg",
+    ]
+    assert yolo[1]["family"] == "yolo"
     assert available_models(engine="stub") == []
+
+
+def test_yolo_cards_use_ultralytics_engine() -> None:
+    spec = get_model("yolov8s-seg")
+    assert spec.engine == "ultralytics"
+    assert spec.family == "yolo"
+    assert spec.ultralytics_name == "yolov8s-seg"
+    assert spec.checkpoint_filename.endswith(".pt")
+    assert spec.checkpoint_url.endswith("yolov8s-seg.pt")
+
+
+def test_yolo_pretrained_path_stays_on_weights_volume(tmp_path: Path) -> None:
+    path = pretrained_path(tmp_path, "yolov8n-seg")
+    assert path.parent.name == "ultralytics"
+    assert path.name == "yolov8n-seg.pt"
+    assert tmp_path in path.parents
 
 
 def test_detectron2_engine_can_be_constructed_without_the_library() -> None:
@@ -85,11 +110,33 @@ def test_detectron2_engine_can_be_constructed_without_the_library() -> None:
     assert engine.name() == "detectron2"
 
 
+def test_ultralytics_engine_can_be_constructed_without_the_library() -> None:
+    engine = get_engine("ultralytics")
+    assert engine.name() == "ultralytics"
+
+
 def test_detectron2_rejects_stub_checkpoint(tmp_path: Path) -> None:
     stub = tmp_path / "model_final.stub.json"
     stub.write_text('{"engine": "stub"}', encoding="utf-8")
-    with pytest.raises(ValueError, match="stub"):
+    with pytest.raises(ValueError, match="Detectron2"):
         reject_incompatible_checkpoint(stub, "detectron2")
     engine = Detectron2Engine()
     with pytest.raises(ValueError):
         engine.load_checkpoint(stub)
+
+
+def test_ultralytics_rejects_detectron2_checkpoint(tmp_path: Path) -> None:
+    weights = tmp_path / "model_0001.pth"
+    weights.write_bytes(b"not-yolo")
+    with pytest.raises(ValueError, match="Ultralytics"):
+        reject_incompatible_checkpoint(weights, "ultralytics")
+    engine = UltralyticsEngine()
+    with pytest.raises(ValueError):
+        engine.load_checkpoint(weights)
+
+
+def test_detectron2_rejects_yolo_checkpoint(tmp_path: Path) -> None:
+    weights = tmp_path / "yolov8s-seg.pt"
+    weights.write_bytes(b"not-detectron2")
+    with pytest.raises(ValueError, match="Detectron2"):
+        reject_incompatible_checkpoint(weights, "detectron2")

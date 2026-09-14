@@ -7,6 +7,7 @@ from engine.training import checkpoint_filename, default_learning_rate, format_e
 def test_checkpoint_filename_is_zero_padded() -> None:
     assert checkpoint_filename(7, ".pth") == "model_0007.pth"
     assert checkpoint_filename(150, "stub.json") == "model_0150.stub.json"
+    assert checkpoint_filename(3, ".pt") == "model_0003.pt"
 
 
 def test_format_eta() -> None:
@@ -20,6 +21,7 @@ def test_format_eta() -> None:
 def test_iteration_from_checkpoint_name() -> None:
     assert iteration_from_checkpoint_name("model_0007.pth") == 7
     assert iteration_from_checkpoint_name("model_0012.stub.json") == 12
+    assert iteration_from_checkpoint_name("model_0003.pt") == 3
     assert iteration_from_checkpoint_name("model_final.pth") is None
 
 

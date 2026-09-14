@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 
+import pytest
 from PIL import Image
 
 from core.jobs import JobRunner, _backend_options_for_checkpoint
@@ -45,6 +46,29 @@ def test_delete_project_removes_folder(tmp_path: Path) -> None:
     assert not root.exists()
     listed = store.list_projects()
     assert listed == []
+
+
+def test_create_ultralytics_project_uses_yolo_default(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("YOLO Loops", ["Loop-A"], engine="ultralytics")
+    assert record.engine == "ultralytics"
+    assert record.model == "yolov8s-seg"
+
+
+def test_update_model_rejects_other_engine(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("YOLO Cards", ["Loop-A"], engine="ultralytics")
+    with pytest.raises(ValueError, match="does not belong"):
+        store.update_model(record.id, "mask_rcnn_r50_fpn")
+
+
+def test_list_checkpoints_skips_backend_sidecar(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("YOLO Weights", ["Loop-A"], engine="ultralytics")
+    (record.weights_dir / "model_0001.pt").write_bytes(b"weights")
+    (record.weights_dir / "model_0001.backend.json").write_text("{}", encoding="utf-8")
+    names = [item["name"] for item in store.list_checkpoints(record.id)]
+    assert names == ["model_0001.pt"]
 
 
 def test_update_model_persists(tmp_path: Path) -> None:

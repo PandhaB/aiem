@@ -142,7 +142,7 @@ def test_engines_models_and_status(client: TestClient) -> None:
     engines = client.get("/api/engines")
     assert engines.status_code == 200
     names = {item["name"] for item in engines.json()["engines"]}
-    assert names == {"stub", "detectron2"}
+    assert names == {"stub", "detectron2", "ultralytics"}
     models = client.get("/api/models")
     assert models.status_code == 200
     payload = models.json()
@@ -154,6 +154,20 @@ def test_engines_models_and_status(client: TestClient) -> None:
     assert "mask_rcnn_x101_fpn" in ids
     assert "mask_rcnn_vitdet_b" in ids
     assert payload["models"][0]["family"] == "mask_rcnn"
+    yolo = client.get("/api/models", params={"engine": "ultralytics"})
+    assert yolo.status_code == 200
+    yolo_payload = yolo.json()
+    assert yolo_payload["default"] == "yolov8s-seg"
+    assert "segment" in yolo_payload["zoo_url"]
+    yolo_ids = [item["id"] for item in yolo_payload["models"]]
+    assert yolo_ids == ["yolov8n-seg", "yolov8s-seg", "yolo11n-seg", "yolo11s-seg"]
+    created_yolo = client.post(
+        "/api/projects",
+        json={"name": "YOLO Demo", "classes": ["Loop-A"], "engine": "ultralytics"},
+    )
+    assert created_yolo.status_code == 200
+    assert created_yolo.json()["engine"] == "ultralytics"
+    assert created_yolo.json()["model"] == "yolov8s-seg"
     stub_models = client.get("/api/models", params={"engine": "stub"})
     assert stub_models.json()["models"] == []
     datasets = client.get("/api/datasets")
@@ -169,6 +183,7 @@ def test_engines_models_and_status(client: TestClient) -> None:
     home = client.get("/")
     assert home.status_code == 200
     assert 'id="active-job-banner"' in home.text
+    assert 'value="ultralytics"' in home.text
     idle = client.get("/api/jobs/active")
     assert idle.status_code == 200
     assert idle.json() == {"job": None}

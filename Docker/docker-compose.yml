@@ -1,4 +1,4 @@
-# One service: web UI + Detectron2 jobs.
+# One service: web UI + training/inference jobs (Detectron2, Ultralytics, stub).
 # Weight files stay on the host (weights/, projects/*/weights/). They are never baked into the image.
 # GPU: NVIDIA Container Toolkit on the host. `runtime: nvidia` is required on some
 # machines (the Compose `deploy.devices` / `--gpus` path can fail NVML even when

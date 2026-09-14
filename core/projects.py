@@ -17,7 +17,15 @@ from core.coco import (
     replace_annotations,
     save_coco,
 )
-from engine.catalog import DEFAULT_ENGINE, DEFAULT_MODEL, get_model
+from engine.catalog import (
+    DEFAULT_ENGINE,
+    DEFAULT_MODEL,
+    KNOWN_ENGINES,
+    checkpoint_suffixes,
+    default_model_for_engine,
+    get_model,
+)
+from engine.training import iteration_from_checkpoint_name
 from engine.types import ClassSpec
 
 DEFAULT_COLORS = [
@@ -107,11 +115,15 @@ class ProjectStore:
         if len(set(name.lower() for name in names)) != len(names):
             raise ValueError("Class names must be unique.")
         engine_name = (engine or DEFAULT_ENGINE).strip()
-        if engine_name not in {"stub", "detectron2"}:
+        if engine_name not in KNOWN_ENGINES:
             raise ValueError(f"Unknown engine: {engine_name}")
-        model_spec = get_model(model)
-        if engine_name == "detectron2" and model_spec.engine != "detectron2":
-            raise ValueError(f"Model {model_spec.id} does not belong to Detectron2.")
+        requested = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        model_spec = get_model(requested)
+        if engine_name != "stub" and model_spec.engine != engine_name:
+            if requested == DEFAULT_MODEL:
+                model_spec = get_model(default_model_for_engine(engine_name))
+            else:
+                raise ValueError(f"Model {model_spec.id} does not belong to {engine_name}.")
 
         project_id = self._unique_slug(cleaned_name)
         classes = [
@@ -163,8 +175,8 @@ class ProjectStore:
     def update_model(self, project_id: str, model: str) -> ProjectRecord:
         record = self.get(project_id)
         model_spec = get_model(model)
-        if record.engine == "detectron2" and model_spec.engine != "detectron2":
-            raise ValueError(f"Model {model_spec.id} does not belong to Detectron2.")
+        if record.engine != "stub" and model_spec.engine != record.engine:
+            raise ValueError(f"Model {model_spec.id} does not belong to {record.engine}.")
         record.model = model_spec.id
         (record.root / "project.json").write_text(json.dumps(record.to_dict(), indent=2), encoding="utf-8")
         return record
@@ -238,10 +250,19 @@ class ProjectStore:
 
     def list_checkpoints(self, project_id: str) -> list[dict]:
         record = self.get(project_id)
+        suffixes = checkpoint_suffixes(record.engine)
         items = []
         for path in sorted(record.weights_dir.glob("*")):
-            if path.is_file():
-                items.append({"name": path.name, "path": str(path)})
+            if not path.is_file() or path.name.endswith(".backend.json"):
+                continue
+            if iteration_from_checkpoint_name(path.name) is None:
+                continue
+            if record.engine == "stub":
+                if not path.name.endswith(".stub.json"):
+                    continue
+            elif suffixes and path.suffix.lower() not in suffixes:
+                continue
+            items.append({"name": path.name, "path": str(path)})
         return items
 
     def _read(self, path: Path) -> ProjectRecord:

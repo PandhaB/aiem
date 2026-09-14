@@ -21,7 +21,7 @@ class SegmentationEngine(Protocol):
     """
 
     def name(self) -> str:
-        """Registry key, e.g. ``stub`` or ``detectron2``."""
+        """Registry key, e.g. ``stub``, ``detectron2``, or ``ultralytics``."""
 
     def train(
         self,

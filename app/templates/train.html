@@ -6,6 +6,8 @@
   <h1>Train</h1>
   {% if project.engine == "stub" %}
   <p class="muted">This project uses the stub engine. It writes a fake checkpoint so you can test the job flow. No neural network is trained.</p>
+  {% elif project.engine == "ultralytics" %}
+  <p class="muted">Engine: Ultralytics YOLO · current model: <code>{{ project.model }}</code>. Public COCO-seg weights are downloaded into the host <code>weights/</code> folder, not into the Docker image. <a id="zoo-link" href="https://docs.ultralytics.com/tasks/segment/" target="_blank" rel="noreferrer">Ultralytics segmentation docs</a></p>
   {% else %}
   <p class="muted">Engine: Detectron2 · current model: <code>{{ project.model }}</code>. Public COCO weights are downloaded into the host <code>weights/</code> folder, not into the Docker image. <a id="zoo-link" href="https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md" target="_blank" rel="noreferrer">Detectron2 Model Zoo</a></p>
   {% endif %}
@@ -13,10 +15,11 @@
 </header>
 <section class="stack">
   <article class="card stack">
-    <label id="model-row" {% if project.engine != "detectron2" %}hidden{% endif %}>Model
+    <label id="model-row" {% if project.engine == "stub" %}hidden{% endif %}>Model
       <select id="model-select"></select>
     </label>
     <p id="vitdet-note" class="muted" hidden>ViTDet keeps a two-stage Mask R-CNN head with a ViT backbone. The input canvas follows your images (rounded up to a multiple of 16, capped at 1024). 256 px TEM tiles stay at 256 — they are not upscaled to the COCO 1024 recipe, which needs ~8–11 GB. Keep batch size 1.</p>
+    <p id="yolo-note" class="muted" hidden>YOLO-seg is a one-stage instance model. Max iterations means <strong>epochs</strong> here (one pass over your images). Nano (n) is lightest; small (s) is a better default on a 6–8 GB GPU. Image size follows your tiles (multiple of 32, capped at 640).</p>
     <fieldset>
       <legend>Weight initialisation</legend>
       <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights</label>
@@ -45,10 +48,10 @@
     <p class="muted">Train once from pretrained or random weights before you can continue a run.</p>
     {% endif %}
     <div class="param-grid">
-      <label>Max iterations
+      <label id="max-iter-row"><span id="max-iter-label">Max iterations</span>
         <input type="number" name="max_iter" id="max-iter" min="1" step="1" value="300">
       </label>
-      <label>Save weights every N iterations
+      <label id="checkpoint-period-row"><span id="checkpoint-period-label">Save weights every N iterations</span>
         <input type="number" name="checkpoint_period" id="checkpoint-period" min="1" step="1" placeholder="Only at the end">
       </label>
       <label>Learning rate
@@ -58,10 +61,10 @@
         <input type="number" name="ims_per_batch" id="ims-per-batch" min="1" step="1" value="1">
       </label>
     </div>
-    <p class="muted">When continuing a run, max iterations are <strong>additional</strong> steps. The previous run folder is left unchanged. Leave “save every N” empty to keep only the last weights (and a save if you stop). Keep the batch size at 1 if GPU memory is tight.</p>
-    {% if project.engine == "detectron2" %}
+    <p id="train-steps-help" class="muted">When continuing a run, max iterations are <strong>additional</strong> steps. The previous run folder is left unchanged. Leave “save every N” empty to keep only the last weights (and a save if you stop). Keep the batch size at 1 if GPU memory is tight.</p>
+    {% if project.engine != "stub" %}
     <details class="fold">
-      <summary>Advanced Detectron2 options</summary>
+      <summary>Advanced training options</summary>
       <div class="param-grid">
         <label id="anchor-sizes-row">Anchor sizes
           <input type="text" id="anchor-sizes" placeholder="32, 64, 128, 256, 512">
@@ -71,6 +74,9 @@
         </label>
         <label id="min-size-row">Minimum image size
           <input type="number" id="min-size" min="1" step="1" placeholder="Detectron2 default">
+        </label>
+        <label id="patience-row" hidden>Early-stop patience (epochs)
+          <input type="number" id="patience" min="0" step="1" placeholder="0 = disabled">
         </label>
       </div>
       <p id="adv-size-help" class="muted">Leave these empty to keep the model card defaults. Anchor fields apply to Mask R-CNN (R50 / R101 / X101). Smaller anchors can help with tiny loops; a larger min size keeps more native resolution (and uses more GPU memory).</p>
@@ -116,44 +122,84 @@
     return text.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean).map(Number).filter((item) => Number.isFinite(item));
   }
 
-  const familyLabels = { mask_rcnn: "Mask R-CNN", vitdet: "ViTDet" };
+  const familyLabels = { mask_rcnn: "Mask R-CNN", vitdet: "ViTDet", yolo: "YOLO" };
+  const maxIterInput = document.getElementById("max-iter");
+  const stepsHelp = document.getElementById("train-steps-help");
 
   function selectedModelMeta() {
     const option = document.getElementById("model-select").selectedOptions[0];
-    if (!option) return { family: "mask_rcnn" };
+    if (!option) {
+      return { family: projectEngine === "ultralytics" ? "yolo" : "mask_rcnn" };
+    }
     return {
       id: option.value,
-      family: option.dataset.family || "mask_rcnn",
+      family: option.dataset.family || (projectEngine === "ultralytics" ? "yolo" : "mask_rcnn"),
       defaultLr: option.dataset.defaultLr,
     };
   }
 
   function suggestedLr(init) {
-    if (init === "random") return "0.0001";
     const meta = selectedModelMeta();
+    if (meta.family === "yolo") return meta.defaultLr || "0.01";
+    if (init === "random") return "0.0001";
     return meta.defaultLr || "0.00025";
   }
 
   function syncModelUi() {
     const meta = selectedModelMeta();
     const mask = meta.family === "mask_rcnn";
+    const yolo = meta.family === "yolo";
     const sizes = document.getElementById("anchor-sizes-row");
     const ratios = document.getElementById("anchor-ratios-row");
+    const patience = document.getElementById("patience-row");
     if (sizes) sizes.hidden = !mask;
     if (ratios) ratios.hidden = !mask;
-    const note = document.getElementById("vitdet-note");
-    if (note) note.hidden = meta.family !== "vitdet";
+    if (patience) patience.hidden = !yolo;
+    const vitNote = document.getElementById("vitdet-note");
+    const yoloNote = document.getElementById("yolo-note");
+    if (vitNote) vitNote.hidden = meta.family !== "vitdet";
+    if (yoloNote) yoloNote.hidden = !yolo;
     const minSize = document.getElementById("min-size");
     const sizeHelp = document.getElementById("adv-size-help");
     if (minSize) {
-      minSize.placeholder = meta.family === "vitdet" ? "Native image size (max 1024)" : "Detectron2 default";
-      minSize.min = meta.family === "vitdet" ? "16" : "1";
-      minSize.step = meta.family === "vitdet" ? "16" : "1";
+      if (yolo) {
+        minSize.placeholder = "Native image size (max 640)";
+        minSize.min = "32";
+        minSize.step = "32";
+      } else if (meta.family === "vitdet") {
+        minSize.placeholder = "Native image size (max 1024)";
+        minSize.min = "16";
+        minSize.step = "16";
+      } else {
+        minSize.placeholder = "Detectron2 default";
+        minSize.min = "1";
+        minSize.step = "1";
+      }
+    }
+    const maxIterLabel = document.getElementById("max-iter-label");
+    const periodLabel = document.getElementById("checkpoint-period-label");
+    if (maxIterLabel) maxIterLabel.textContent = yolo ? "Epochs" : "Max iterations";
+    if (periodLabel) {
+      periodLabel.textContent = yolo
+        ? "Save weights every N epochs"
+        : "Save weights every N iterations";
+    }
+    if (yolo && maxIterInput && !maxIterInput.dataset.touched) {
+      maxIterInput.value = "50";
+    }
+    if (stepsHelp) {
+      stepsHelp.innerHTML = yolo
+        ? "When continuing a run, epochs are <strong>additional</strong>. The previous run folder is left unchanged. Leave “save every N” empty to keep only the last weights (and a save if you stop)."
+        : "When continuing a run, max iterations are <strong>additional</strong> steps. The previous run folder is left unchanged. Leave “save every N” empty to keep only the last weights (and a save if you stop). Keep the batch size at 1 if GPU memory is tight.";
     }
     if (sizeHelp) {
-      sizeHelp.textContent = meta.family === "vitdet"
-        ? "Leave min size empty to train at native tile size (multiple of 16, max 1024). Set 1024 only for the COCO recipe — that upscales small TEM tiles and needs much more GPU memory. Anchors do not apply to ViTDet."
-        : "Leave these empty to keep the model card defaults. Anchor fields apply to Mask R-CNN (R50 / R101 / X101). Smaller anchors can help with tiny loops; a larger min size keeps more native resolution (and uses more GPU memory).";
+      if (yolo) {
+        sizeHelp.textContent = "Leave image size empty to train at native tile size (multiple of 32, max 640). Set 640 only for the COCO recipe. Patience 0 disables early stopping. Anchors do not apply to YOLO.";
+      } else if (meta.family === "vitdet") {
+        sizeHelp.textContent = "Leave min size empty to train at native tile size (multiple of 16, max 1024). Set 1024 only for the COCO recipe — that upscales small TEM tiles and needs much more GPU memory. Anchors do not apply to ViTDet.";
+      } else {
+        sizeHelp.textContent = "Leave these empty to keep the model card defaults. Anchor fields apply to Mask R-CNN (R50 / R101 / X101). Smaller anchors can help with tiny loops; a larger min size keeps more native resolution (and uses more GPU memory).";
+      }
     }
     if (!lrInput.dataset.touched) {
       const init = document.querySelector("input[name=init]:checked").value;
@@ -163,7 +209,7 @@
 
   async function loadModels() {
     const select = document.getElementById("model-select");
-    if (!select || projectEngine !== "detectron2") return;
+    if (!select || projectEngine === "stub") return;
     const response = await fetch(`/api/models?engine=${encodeURIComponent(projectEngine)}`);
     const payload = await response.json();
     const zoo = document.getElementById("zoo-link");
@@ -204,6 +250,11 @@
   lrInput.addEventListener("input", () => {
     lrInput.dataset.touched = "1";
   });
+  if (maxIterInput) {
+    maxIterInput.addEventListener("input", () => {
+      maxIterInput.dataset.touched = "1";
+    });
+  }
 
   startBtn.addEventListener("click", async () => {
     const init = document.querySelector("input[name=init]:checked").value;
@@ -217,7 +268,7 @@
     if (periodRaw) body.checkpoint_period = Number(periodRaw);
     if (lrRaw) body.learning_rate = Number(lrRaw);
     if (batchRaw) body.ims_per_batch = Number(batchRaw);
-    if (projectEngine === "detectron2") {
+    if (projectEngine === "detectron2" || projectEngine === "ultralytics") {
       const model = document.getElementById("model-select").value;
       if (model) body.model = model;
       const backend_options = {};
@@ -228,8 +279,12 @@
         if (sizes.length) backend_options.anchor_sizes = sizes;
         if (ratios.length) backend_options.anchor_aspect_ratios = ratios;
       }
-      const minSize = document.getElementById("min-size").value;
+      const minSize = document.getElementById("min-size") && document.getElementById("min-size").value;
       if (minSize) backend_options.min_size = Number(minSize);
+      if (meta.family === "yolo") {
+        const patience = document.getElementById("patience") && document.getElementById("patience").value;
+        if (patience) backend_options.patience = Number(patience);
+      }
       if (Object.keys(backend_options).length) body.backend_options = backend_options;
     }
     if (init === "checkpoint") {

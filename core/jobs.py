@@ -10,7 +10,7 @@ from pathlib import Path
 
 from core.paths import resolve_under
 from core.projects import ProjectStore
-from engine.catalog import DEFAULT_MODEL, ensure_pretrained, reject_incompatible_checkpoint
+from engine.catalog import DEFAULT_MODEL, checkpoint_suffixes, ensure_pretrained, reject_incompatible_checkpoint
 from engine.registry import get_engine
 from engine.training import format_eta, iteration_from_checkpoint_name
 from engine.types import InferRequest, TrainRequest
@@ -290,7 +290,7 @@ class JobRunner:
             model_id = params.get("model") or record.model or DEFAULT_MODEL
             if init == "checkpoint":
                 pretrained = Path(params["resume_weights"]) if params.get("resume_weights") else None
-            elif init == "pretrained" and record.engine == "detectron2":
+            elif init == "pretrained" and record.engine in {"detectron2", "ultralytics"}:
                 pretrained = ensure_pretrained(
                     self.shared_weights_dir,
                     model_id,
@@ -449,10 +449,10 @@ class JobRunner:
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_name}")
             return path
         files = sorted(path for path in weights_dir.iterdir() if path.is_file())
-        if engine_name == "detectron2":
-            files = [path for path in files if path.suffix.lower() in {".pth", ".pkl"}]
-        elif engine_name == "stub":
-            files = [path for path in files if path.suffix.lower() == ".json"]
+        files = [path for path in files if not path.name.endswith(".backend.json")]
+        suffixes = checkpoint_suffixes(engine_name)
+        if suffixes:
+            files = [path for path in files if path.suffix.lower() in suffixes]
         numbered = [
             path for path in files if iteration_from_checkpoint_name(path.name) is not None
         ]
@@ -565,10 +565,10 @@ def _latest_named_checkpoint(folder: Path, engine_name: str) -> Path | None:
     if not folder.is_dir():
         return None
     files = sorted(path for path in folder.iterdir() if path.is_file())
-    if engine_name == "detectron2":
-        files = [path for path in files if path.suffix.lower() in {".pth", ".pkl"}]
-    elif engine_name == "stub":
-        files = [path for path in files if path.suffix.lower() == ".json"]
+    files = [path for path in files if not path.name.endswith(".backend.json")]
+    suffixes = checkpoint_suffixes(engine_name)
+    if suffixes:
+        files = [path for path in files if path.suffix.lower() in suffixes]
     numbered = [path for path in files if iteration_from_checkpoint_name(path.name) is not None]
     if numbered:
         files = sorted(numbered, key=lambda path: iteration_from_checkpoint_name(path.name) or 0)

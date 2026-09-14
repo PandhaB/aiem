@@ -7,7 +7,24 @@ from urllib.request import urlretrieve
 
 DEFAULT_MODEL = "mask_rcnn_r50_fpn"
 DEFAULT_ENGINE = "detectron2"
+DEFAULT_YOLO_MODEL = "yolov8s-seg"
 MODEL_ZOO_URL = "https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md"
+ULTRALYTICS_DOCS_URL = "https://docs.ultralytics.com/tasks/segment/"
+KNOWN_ENGINES = ("stub", "detectron2", "ultralytics")
+ENGINE_ZOO_URLS = {
+    "detectron2": MODEL_ZOO_URL,
+    "ultralytics": ULTRALYTICS_DOCS_URL,
+}
+DEFAULT_MODELS = {
+    "detectron2": DEFAULT_MODEL,
+    "ultralytics": DEFAULT_YOLO_MODEL,
+    "stub": DEFAULT_MODEL,
+}
+CHECKPOINT_SUFFIXES = {
+    "detectron2": {".pth", ".pkl"},
+    "ultralytics": {".pt"},
+    "stub": {".json"},
+}
 
 
 @dataclass(frozen=True)
@@ -19,11 +36,12 @@ class ModelSpec:
     engine: str
     family: str
     task: str
-    detectron2_config: str
-    checkpoint_url: str
-    checkpoint_filename: str
+    detectron2_config: str = ""
+    checkpoint_url: str = ""
+    checkpoint_filename: str = ""
     config_kind: str = "yaml"
     default_lr: float | None = None
+    ultralytics_name: str = ""
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -84,6 +102,50 @@ MODELS: dict[str, ModelSpec] = {
         config_kind="lazy",
         default_lr=0.0001,
     ),
+    "yolov8n-seg": ModelSpec(
+        id="yolov8n-seg",
+        label="YOLOv8n-seg",
+        engine="ultralytics",
+        family="yolo",
+        task="instance",
+        checkpoint_url="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt",
+        checkpoint_filename="yolov8n-seg.pt",
+        default_lr=0.01,
+        ultralytics_name="yolov8n-seg",
+    ),
+    "yolov8s-seg": ModelSpec(
+        id="yolov8s-seg",
+        label="YOLOv8s-seg",
+        engine="ultralytics",
+        family="yolo",
+        task="instance",
+        checkpoint_url="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt",
+        checkpoint_filename="yolov8s-seg.pt",
+        default_lr=0.01,
+        ultralytics_name="yolov8s-seg",
+    ),
+    "yolo11n-seg": ModelSpec(
+        id="yolo11n-seg",
+        label="YOLO11n-seg",
+        engine="ultralytics",
+        family="yolo",
+        task="instance",
+        checkpoint_url="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt",
+        checkpoint_filename="yolo11n-seg.pt",
+        default_lr=0.01,
+        ultralytics_name="yolo11n-seg",
+    ),
+    "yolo11s-seg": ModelSpec(
+        id="yolo11s-seg",
+        label="YOLO11s-seg",
+        engine="ultralytics",
+        family="yolo",
+        task="instance",
+        checkpoint_url="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s-seg.pt",
+        checkpoint_filename="yolo11s-seg.pt",
+        default_lr=0.01,
+        ultralytics_name="yolo11s-seg",
+    ),
 }
 
 
@@ -94,6 +156,20 @@ def list_models(engine: str | None = None, task: str | None = None) -> list[Mode
     if task:
         items = [item for item in items if item.task == task]
     return items
+
+
+def default_model_for_engine(engine: str | None) -> str:
+    return DEFAULT_MODELS.get((engine or DEFAULT_ENGINE).strip(), DEFAULT_MODEL)
+
+
+def engine_zoo_url(engine: str | None) -> str:
+    if not engine:
+        return MODEL_ZOO_URL
+    return ENGINE_ZOO_URLS.get(engine.strip(), MODEL_ZOO_URL)
+
+
+def checkpoint_suffixes(engine_name: str) -> set[str]:
+    return CHECKPOINT_SUFFIXES.get(engine_name, set())
 
 
 def get_model(model_id: str | None) -> ModelSpec:
@@ -115,7 +191,7 @@ def ensure_pretrained(
     model_id: str | None = None,
     on_progress=None,
 ) -> Path:
-    """Download public COCO weights into the host weights volume if missing."""
+    """Download public pretrained weights into the host weights volume if missing."""
     spec = get_model(model_id)
     dest = pretrained_path(weights_dir, spec.id)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -165,13 +241,30 @@ def describe_device() -> dict[str, object]:
     }
 
 
+def ultralytics_installed() -> bool:
+    try:
+        import ultralytics  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def reject_incompatible_checkpoint(path: Path, engine_name: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     suffix = path.suffix.lower()
-    if engine_name == "detectron2" and suffix in {".json"}:
-        raise ValueError(
-            "This file is not a Detectron2 checkpoint (looks like the stub JSON). Train with the Detectron2 engine."
-        )
-    if engine_name == "stub" and suffix in {".pth", ".pkl"}:
-        raise ValueError("This checkpoint belongs to Detectron2. Switch the project engine or train with the stub.")
+    allowed = checkpoint_suffixes(engine_name)
+    if allowed and suffix not in allowed:
+        if engine_name == "ultralytics":
+            raise ValueError(
+                "This file is not an Ultralytics YOLO checkpoint (.pt). Train with the Ultralytics engine."
+            )
+        if engine_name == "detectron2":
+            raise ValueError(
+                "This file is not a Detectron2 checkpoint. Train with the Detectron2 engine."
+            )
+        if engine_name == "stub":
+            raise ValueError(
+                "This checkpoint does not belong to the stub engine. Switch the project engine."
+            )
+        raise ValueError(f"Unsupported checkpoint type for {engine_name}: {path.name}")

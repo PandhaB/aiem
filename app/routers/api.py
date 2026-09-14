@@ -12,7 +12,15 @@ from pydantic import BaseModel, Field
 from core.coco import load_coco
 from core.jobs import JobError
 from core.paths import list_image_folders
-from engine.catalog import DEFAULT_ENGINE, DEFAULT_MODEL, MODEL_ZOO_URL, describe_device, get_model
+from engine.catalog import (
+    DEFAULT_ENGINE,
+    DEFAULT_MODEL,
+    KNOWN_ENGINES,
+    default_model_for_engine,
+    describe_device,
+    engine_zoo_url,
+    get_model,
+)
 from engine.registry import available_engines, available_models
 
 router = APIRouter(prefix="/api")
@@ -87,8 +95,8 @@ def list_engines() -> dict:
 def list_models(engine: str | None = None) -> dict:
     return {
         "models": available_models(engine=engine),
-        "default": DEFAULT_MODEL,
-        "zoo_url": MODEL_ZOO_URL,
+        "default": default_model_for_engine(engine or DEFAULT_ENGINE),
+        "zoo_url": engine_zoo_url(engine),
     }
 
 
@@ -110,7 +118,7 @@ def list_projects(request: Request) -> dict:
 
 @router.post("/projects")
 def create_project(request: Request, body: CreateProjectBody) -> dict:
-    if body.engine not in {"stub", "detectron2"}:
+    if body.engine not in KNOWN_ENGINES:
         raise HTTPException(status_code=400, detail="Unknown engine.")
     try:
         get_model(body.model)
