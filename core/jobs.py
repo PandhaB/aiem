@@ -130,6 +130,7 @@ class JobRunner:
                 "eta_seconds": None,
                 "eta": None,
                 "checkpoints": [],
+                "model": record.model,
             },
         )
         params = {
@@ -206,6 +207,7 @@ class JobRunner:
                 "finished_at": None,
                 "result": None,
                 "source": source,
+                "relative_path": relative_path,
             },
         )
         self._submit(self._run_infer, record.id, colors, checkpoint_name, str(images_dir), run_dir)
@@ -379,7 +381,7 @@ class JobRunner:
         try:
             on_progress(0.01, "Starting inference")
             engine = get_engine(record.engine)
-            checkpoint = self._resolve_checkpoint(record.weights_dir, checkpoint_name, record.engine)
+            checkpoint = self._resolve_checkpoint(record, checkpoint_name, record.engine)
             reject_incompatible_checkpoint(checkpoint, record.engine)
             result = engine.infer(
                 InferRequest(
@@ -407,6 +409,7 @@ class JobRunner:
                 "overlays": str(result.overlay_dir),
                 "masks": str(result.masks_dir),
                 "preview": overlays[0] if overlays else None,
+                "images": overlays,
                 "stopped": result.stopped,
             }
             self._write_status(run_dir, current)
@@ -437,30 +440,35 @@ class JobRunner:
 
     def _resolve_checkpoint(
         self,
-        weights_dir: Path,
+        record,
         checkpoint_name: str | None,
         engine_name: str,
     ) -> Path:
-        if checkpoint_name:
-            path = (weights_dir / Path(checkpoint_name).name).resolve()
-            if not str(path).startswith(str(weights_dir.resolve())):
-                raise ValueError("Invalid checkpoint path.")
-            if not path.is_file():
-                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_name}")
+        if not checkpoint_name:
+            listed = self.store.list_checkpoints(record.id)
+            if not listed:
+                raise FileNotFoundError("No checkpoint in the project weights folder. Train first.")
+            checkpoint_name = listed[0].get("ref") or listed[0]["name"]
+        text = checkpoint_name.strip().strip("/")
+        if "/" in text:
+            run_id, file_name = text.split("/", 1)
+            run_id = Path(run_id).name
+            file_name = Path(file_name).name
+            run_dir = (record.runs_dir / run_id).resolve()
+            if not str(run_dir).startswith(str(record.runs_dir.resolve())) or not run_dir.is_dir():
+                raise FileNotFoundError(f"Training run not found: {run_id}")
+            output = (run_dir / "output").resolve()
+            path = (output / file_name).resolve()
+            if not str(path).startswith(str(output)) or not path.is_file():
+                raise FileNotFoundError(f"Checkpoint not found: {file_name} in {run_id}")
             return path
-        files = sorted(path for path in weights_dir.iterdir() if path.is_file())
-        files = [path for path in files if not path.name.endswith(".backend.json")]
-        suffixes = checkpoint_suffixes(engine_name)
-        if suffixes:
-            files = [path for path in files if path.suffix.lower() in suffixes]
-        numbered = [
-            path for path in files if iteration_from_checkpoint_name(path.name) is not None
-        ]
-        if numbered:
-            files = sorted(numbered, key=lambda path: iteration_from_checkpoint_name(path.name) or 0)
-        if not files:
-            raise FileNotFoundError("No checkpoint in the project weights folder. Train first.")
-        return files[-1]
+        weights_dir = record.weights_dir
+        path = (weights_dir / Path(text).name).resolve()
+        if not str(path).startswith(str(weights_dir.resolve())):
+            raise ValueError("Invalid checkpoint path.")
+        if not path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_name}")
+        return path
 
     def _optional_shared_weights(self) -> Path | None:
         files = sorted(path for path in self.shared_weights_dir.iterdir() if path.is_file())
@@ -493,6 +501,25 @@ class JobRunner:
                 raise FileNotFoundError(f"Dataset folder not found: {relative_path}")
             return folder
         return record.images_dir
+
+    def infer_original_path(self, record, run_dir: Path, filename: str) -> Path:
+        name = Path(filename).name
+        status_path = run_dir / "status.json"
+        status = _read_json(status_path) if status_path.is_file() else {}
+        source = status.get("source") or "project"
+        if source == "upload":
+            folder = run_dir / "input_images"
+        elif source == "dataset":
+            relative = status.get("relative_path") or ""
+            if self.datasets_dir is None:
+                raise FileNotFoundError("Datasets folder is not configured.")
+            folder = resolve_under(self.datasets_dir, relative)
+        else:
+            folder = record.images_dir
+        path = (folder / name).resolve()
+        if not str(path).startswith(str(folder.resolve())) or not path.is_file():
+            raise FileNotFoundError(name)
+        return path
 
     def _resolve_resume(self, record, resume_run_id: str | None, resume_checkpoint: str | None) -> dict:
         checkpoint: Path | None = None

@@ -70,10 +70,9 @@ window.pollJob = async function pollJob(jobId, ui) {
 
 window.renderJobLog = function renderJobLog(node, lines) {
   const text = (lines || []).join("\n");
-  const stick =
-    node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+  const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
   node.textContent = text;
-  if (stick || node.dataset.stick !== "0") node.scrollTop = node.scrollHeight;
+  if (nearBottom) node.scrollTop = node.scrollHeight;
 };
 
 window.drawLossCurves = function drawLossCurves(canvas, history) {
@@ -89,7 +88,6 @@ window.drawLossCurves = function drawLossCurves(canvas, history) {
   }
   canvas.hidden = false;
   if (empty) empty.hidden = true;
-  if (legend) legend.hidden = false;
 
   const width = canvas.width;
   const height = canvas.height;
@@ -98,10 +96,13 @@ window.drawLossCurves = function drawLossCurves(canvas, history) {
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const xs = points.map((row) => Number(row.iter) || 0);
-  const series = [
-    { key: "total_loss", color: "#b23a2f" },
-    { key: "loss_mask", color: "#2a9d8f" },
-  ];
+  const series = window.lossCurveSeries(points);
+  if (legend) {
+    legend.hidden = series.length === 0;
+    legend.innerHTML = series
+      .map((item) => `<span class="swatch" style="background:${item.color}"></span> ${item.label}`)
+      .join(" ");
+  }
   let yMin = Infinity;
   let yMax = -Infinity;
   series.forEach((item) => {
@@ -142,7 +143,7 @@ window.drawLossCurves = function drawLossCurves(canvas, history) {
   ctx.fillText(yMin.toFixed(3), 4, pad.top + plotH);
   ctx.fillText(String(xMin), pad.left, height - 8);
   ctx.fillText(String(xMax), pad.left + plotW - 24, height - 8);
-  ctx.fillText("iteration", pad.left + plotW / 2 - 24, height - 8);
+  ctx.fillText("step", pad.left + plotW / 2 - 12, height - 8);
 
   series.forEach((item) => {
     const usable = points.filter((row) => Number.isFinite(Number(row[item.key])));
@@ -157,6 +158,29 @@ window.drawLossCurves = function drawLossCurves(canvas, history) {
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
+  });
+};
+
+window.lossCurveSeries = function lossCurveSeries(points) {
+  const present = (key) => (points || []).some((row) => Number.isFinite(Number(row[key])));
+  const catalog = [
+    { key: "total_loss", label: "Total loss", color: "#b23a2f" },
+    { key: "loss_mask", label: "Mask / seg loss", color: "#2a9d8f" },
+    { key: "seg_loss", label: "Seg loss", color: "#2a9d8f" },
+    { key: "box_loss", label: "Box loss", color: "#e9c46a" },
+    { key: "loss_cls", label: "Cls loss", color: "#457b9d" },
+    { key: "cls_loss", label: "Cls loss", color: "#457b9d" },
+    { key: "dfl_loss", label: "DFL loss", color: "#9b5de5" },
+  ];
+  const skipIf = { seg_loss: "loss_mask", cls_loss: "loss_cls" };
+  const usedLabels = new Set();
+  return catalog.filter((item) => {
+    if (!present(item.key)) return false;
+    const alias = skipIf[item.key];
+    if (alias && present(alias)) return false;
+    if (usedLabels.has(item.label)) return false;
+    usedLabels.add(item.label);
+    return true;
   });
 };
 

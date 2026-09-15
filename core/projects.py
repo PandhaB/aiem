@@ -250,19 +250,46 @@ class ProjectStore:
 
     def list_checkpoints(self, project_id: str) -> list[dict]:
         record = self.get(project_id)
-        suffixes = checkpoint_suffixes(record.engine)
-        items = []
-        for path in sorted(record.weights_dir.glob("*")):
-            if not path.is_file() or path.name.endswith(".backend.json"):
+        items: list[dict] = []
+        seen_run_files: set[str] = set()
+        for run in self.list_runs(project_id):
+            if run.get("kind") != "train" or run.get("status") not in {"completed", "stopped"}:
                 continue
-            if iteration_from_checkpoint_name(path.name) is None:
+            run_id = run.get("id")
+            if not run_id:
                 continue
-            if record.engine == "stub":
-                if not path.name.endswith(".stub.json"):
-                    continue
-            elif suffixes and path.suffix.lower() not in suffixes:
+            files = _checkpoint_files(record.runs_dir / run_id / "output", record.engine)
+            files.sort(key=lambda path: iteration_from_checkpoint_name(path.name) or 0, reverse=True)
+            model = _model_for_run(run, record)
+            for path in files:
+                seen_run_files.add(path.name)
+                step = iteration_from_checkpoint_name(path.name)
+                items.append(
+                    {
+                        "name": path.name,
+                        "ref": f"{run_id}/{path.name}",
+                        "run_id": run_id,
+                        "label": _checkpoint_label(run_id, path.name, step, run.get("status"), model),
+                        "iteration": step,
+                        "status": run.get("status"),
+                        "model": model,
+                    }
+                )
+        for path in _checkpoint_files(record.weights_dir, record.engine):
+            if path.name in seen_run_files:
                 continue
-            items.append({"name": path.name, "path": str(path)})
+            step = iteration_from_checkpoint_name(path.name)
+            items.append(
+                {
+                    "name": path.name,
+                    "ref": path.name,
+                    "run_id": None,
+                    "label": f"project weights / {path.name}",
+                    "iteration": step,
+                    "status": None,
+                    "model": record.model,
+                }
+            )
         return items
 
     def _read(self, path: Path) -> ProjectRecord:
@@ -294,3 +321,58 @@ class ProjectStore:
             candidate = f"{slug}-{suffix}"
             suffix += 1
         return candidate
+
+
+def _checkpoint_files(folder: Path, engine: str) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    suffixes = checkpoint_suffixes(engine)
+    items = []
+    for path in folder.iterdir():
+        if not path.is_file() or path.name.endswith(".backend.json"):
+            continue
+        if iteration_from_checkpoint_name(path.name) is None:
+            continue
+        if engine == "stub":
+            if not path.name.endswith(".stub.json"):
+                continue
+        elif suffixes and path.suffix.lower() not in suffixes:
+            continue
+        items.append(path)
+    return items
+
+
+def _checkpoint_label(
+    run_id: str,
+    filename: str,
+    step: int | None,
+    status: str | None,
+    model: str | None,
+) -> str:
+    extras = []
+    if step is not None:
+        extras.append(f"step {step}")
+    if model:
+        extras.append(model)
+    if status:
+        extras.append(status)
+    extra = ", ".join(extras)
+    if extra:
+        return f"{run_id} / {filename} ({extra})"
+    return f"{run_id} / {filename}"
+
+
+def _model_for_run(run: dict, record: ProjectRecord) -> str:
+    if run.get("model"):
+        return run["model"]
+    run_id = run.get("id")
+    if run_id:
+        metrics_path = record.runs_dir / run_id / "output" / "metrics.json"
+        if metrics_path.is_file():
+            try:
+                payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("model"):
+                return payload["model"]
+    return record.model

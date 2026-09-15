@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import shutil
 import time
@@ -97,7 +96,6 @@ class UltralyticsEngine:
         saved: list[Path] = []
         stopped = False
         last_iter = request.start_iter
-        log_handler = _install_log_handler(on_progress)
 
         def on_epoch_end(trainer) -> None:
             nonlocal last_iter, stopped
@@ -123,22 +121,24 @@ class UltralyticsEngine:
                 on_progress,
                 0.1 + 0.85 * (epoch_num / epochs),
                 message,
-                log_line=(
-                    f"epoch: {epoch_num}/{epochs}  total_loss: {metrics.get('total_loss', 0):.4f}"
-                    + (f"  saved {named.name}" if named is not None else "")
-                ),
+                log_line=_epoch_log_line(epoch_num, epochs, metrics, trainer, named),
                 iteration=iteration,
                 max_iter=request.start_iter + epochs,
                 eta_seconds=eta,
-                metrics=metrics,
+                metrics=metrics or None,
                 checkpoint_path=str(named) if named is not None else None,
             )
             if stopping:
                 stopped = True
                 trainer.stop = True
 
+        def on_fit_epoch_end(trainer) -> None:
+            for line in val_table_lines(trainer):
+                self._report(on_progress, None, None, log_line=line)
+
         try:
             model.add_callback("on_train_epoch_end", on_epoch_end)
+            model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
             model.train(
                 data=str(yaml_path),
                 epochs=epochs,
@@ -154,14 +154,11 @@ class UltralyticsEngine:
                 patience=patience,
                 save_period=save_period,
                 plots=False,
-                verbose=True,
+                verbose=False,
                 amp=bool(torch.cuda.is_available()),
             )
         except TrainingStopped:
             stopped = True
-        finally:
-            if log_handler is not None:
-                _remove_log_handler(log_handler)
 
         named_checkpoint = _final_named_checkpoint(request.output_dir, last_iter, saved)
         if named_checkpoint is None or not named_checkpoint.is_file():
@@ -334,7 +331,7 @@ class UltralyticsEngine:
         return yolo_mod.YOLO(f"{spec.ultralytics_name}.yaml")
 
     @staticmethod
-    def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:
+    def _report(on_progress: ProgressCallback | None, value: float | None, message: str | None, **extra) -> None:
         if on_progress is not None:
             on_progress(value, message, **extra)
 
@@ -352,6 +349,8 @@ def _configure_ultralytics_env() -> Path:
     config = dest / "config"
     config.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("YOLO_CONFIG_DIR", str(config))
+    os.environ["YOLO_VERBOSE"] = "false"
+    os.environ["TQDM_DISABLE"] = "1"
     Path(os.environ["YOLO_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
     return dest
 
@@ -388,28 +387,193 @@ def _torch():
     return torch
 
 
-def _epoch_metrics(trainer) -> dict[str, float]:
-    metrics: dict[str, float] = {}
-    tloss = getattr(trainer, "tloss", None)
-    values: list[float] = []
-    if tloss is not None:
-        if hasattr(tloss, "detach"):
-            raw = tloss.detach().cpu().flatten().tolist()
-        elif isinstance(tloss, (list, tuple)):
-            raw = list(tloss)
-        else:
-            try:
-                raw = [float(tloss)]
-            except (TypeError, ValueError):
-                raw = []
-        values = [float(item) for item in raw]
-    if values:
-        metrics["total_loss"] = float(sum(values))
-        if len(values) > 1:
-            metrics["loss_mask"] = values[1]
-        if len(values) > 2:
-            metrics["loss_cls"] = values[2]
+def yolo_train_metrics(tloss, loss_names: tuple | list = ()) -> dict[str, float]:
+    """Map Ultralytics running losses onto the job history keys used by the UI.
+
+    Recent Ultralytics builds store ``tloss`` as a dict (box_loss, seg_loss, …).
+    Older builds used a tensor. Either way we expose ``total_loss`` plus
+    Detectron2-friendly aliases (``loss_mask``, ``loss_cls``) so one chart works.
+    """
+    losses = _loss_map(tloss, loss_names)
+    if not losses:
+        return {}
+    metrics = dict(losses)
+    metrics["total_loss"] = float(sum(losses.values()))
+    if "seg_loss" in losses:
+        metrics["loss_mask"] = losses["seg_loss"]
+    if "cls_loss" in losses:
+        metrics["loss_cls"] = losses["cls_loss"]
+    if "box_loss" in losses:
+        metrics["loss_box_reg"] = losses["box_loss"]
     return metrics
+
+
+def _epoch_metrics(trainer) -> dict[str, float]:
+    names = getattr(trainer, "loss_names", ()) or ()
+    metrics = yolo_train_metrics(getattr(trainer, "tloss", None), names)
+    if metrics:
+        return metrics
+    labeled = getattr(trainer, "metrics", None)
+    if not isinstance(labeled, dict):
+        return {}
+    train_only = {
+        key.split("/")[-1]: value
+        for key, value in labeled.items()
+        if str(key).startswith("train/")
+    }
+    return yolo_train_metrics(train_only, names)
+
+
+def _epoch_log_line(epoch_num: int, epochs: int, metrics: dict[str, float], trainer, named: Path | None) -> str:
+    parts = [f"epoch: {epoch_num}/{epochs}"]
+    memory = _gpu_mem(trainer)
+    if memory is not None:
+        parts.append(f"GPU_mem: {memory:.3g}G")
+    for key in ("box_loss", "seg_loss", "cls_loss", "dfl_loss", "sem_loss"):
+        if key in metrics:
+            parts.append(f"{key}: {metrics[key]:.4f}")
+    if "total_loss" in metrics:
+        parts.append(f"total_loss: {metrics['total_loss']:.4f}")
+    if named is not None:
+        parts.append(f"saved {named.name}")
+    return "  ".join(parts)
+
+
+def val_table_lines(trainer) -> list[str]:
+    """Ultralytics validation summary (Class / Instances / Box / Mask), one snapshot per epoch."""
+    metrics = getattr(trainer, "metrics", None)
+    if not isinstance(metrics, dict):
+        return []
+    box = [
+        _metric_named(metrics, "precision(B)", "metrics/precision(B)"),
+        _metric_named(metrics, "recall(B)", "metrics/recall(B)"),
+        _metric_named(metrics, "mAP50(B)", "metrics/mAP50(B)"),
+        _metric_named(metrics, "mAP50-95(B)", "metrics/mAP50-95(B)"),
+    ]
+    mask = [
+        _metric_named(metrics, "precision(M)", "metrics/precision(M)"),
+        _metric_named(metrics, "recall(M)", "metrics/recall(M)"),
+        _metric_named(metrics, "mAP50(M)", "metrics/mAP50(M)"),
+        _metric_named(metrics, "mAP50-95(M)", "metrics/mAP50-95(M)"),
+    ]
+    if all(item is None for item in box + mask):
+        return []
+    images, instances = _val_counts(trainer)
+    header = (
+        "Class     Images  Instances      "
+        "Box(P          R      mAP50  mAP50-95)     "
+        "Mask(P          R      mAP50  mAP50-95)"
+    )
+    row = (
+        f"{'all':<9}{images:>8}{instances:>11}      "
+        f"{_fmt_map(box[0]):>6} {_fmt_map(box[1]):>10} {_fmt_map(box[2]):>10} {_fmt_map(box[3]):>10}     "
+        f"{_fmt_map(mask[0]):>6} {_fmt_map(mask[1]):>10} {_fmt_map(mask[2]):>10} {_fmt_map(mask[3]):>10}"
+    )
+    return [header, row]
+
+
+def _metric_named(metrics: dict, *names: str) -> float | None:
+    lookup = {}
+    for key, raw in metrics.items():
+        value = _as_float(raw)
+        if value is None:
+            continue
+        lookup[str(key)] = value
+        lookup[str(key).split("/")[-1]] = value
+    for name in names:
+        if name in lookup:
+            return lookup[name]
+    return None
+
+
+def _val_counts(trainer) -> tuple[str, str]:
+    images, instances = "-", "-"
+    validator = getattr(trainer, "validator", None)
+    if validator is None:
+        return images, instances
+    seen = getattr(validator, "seen", None)
+    if seen is not None:
+        try:
+            images = str(int(seen))
+        except (TypeError, ValueError):
+            pass
+    nt = getattr(getattr(validator, "metrics", None), "nt_per_class", None)
+    if nt is not None:
+        try:
+            total = nt.sum() if hasattr(nt, "sum") else sum(nt)
+            instances = str(int(total))
+        except (TypeError, ValueError):
+            pass
+    return images, instances
+
+
+def _fmt_map(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3g}"
+
+
+def _loss_map(tloss, loss_names: tuple | list = ()) -> dict[str, float]:
+    if tloss is None:
+        return {}
+    if isinstance(tloss, dict):
+        mapped = {}
+        for key, raw in tloss.items():
+            value = _as_float(raw)
+            if value is None:
+                continue
+            mapped[str(key).split("/")[-1]] = value
+        return mapped
+    values = _as_float_list(tloss)
+    names = [str(name).split("/")[-1] for name in loss_names if str(name).strip()]
+    if names and len(names) == len(values):
+        return dict(zip(names, values))
+    fallback = ("box_loss", "seg_loss", "cls_loss", "dfl_loss", "sem_loss")
+    return {fallback[index]: values[index] for index in range(min(len(values), len(fallback)))}
+
+
+def _as_float(value) -> float | None:
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        try:
+            tensor = value.detach().cpu().flatten()
+            if tensor.numel() == 0:
+                return None
+            return float(tensor.mean().item())
+        except Exception:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float_list(value) -> list[float]:
+    if hasattr(value, "detach"):
+        try:
+            return [float(item) for item in value.detach().cpu().flatten().tolist()]
+        except Exception:
+            return []
+    if isinstance(value, (list, tuple)):
+        values = []
+        for item in value:
+            number = _as_float(item)
+            if number is not None:
+                values.append(number)
+        return values
+    number = _as_float(value)
+    return [number] if number is not None else []
+
+
+def _gpu_mem(trainer) -> float | None:
+    getter = getattr(trainer, "_get_memory", None)
+    if callable(getter):
+        try:
+            return float(getter())
+        except Exception:
+            return None
+    return None
 
 
 def _copy_last_weights(trainer, output_dir: Path, iteration: int) -> Path | None:
@@ -456,41 +620,6 @@ def _read_backend_meta(folder: Path) -> dict:
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def _install_log_handler(on_progress: ProgressCallback | None) -> logging.Handler | None:
-    if on_progress is None:
-        return None
-    handler = _ProgressLogHandler(on_progress)
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logging.getLogger("ultralytics").addHandler(handler)
-    logging.getLogger("ultralytics").setLevel(logging.INFO)
-    return handler
-
-
-def _remove_log_handler(handler: logging.Handler) -> None:
-    logging.getLogger("ultralytics").removeHandler(handler)
-
-
-class _ProgressLogHandler(logging.Handler):
-    def __init__(self, on_progress: ProgressCallback) -> None:
-        super().__init__()
-        self._on_progress = on_progress
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.exc_info:
-            return
-        try:
-            line = self.format(record)
-        except Exception:
-            return
-        if not line:
-            return
-        try:
-            self._on_progress(None, None, log_line=line)
-        except Exception:
-            pass
 
 
 def _list_images(images_dir: Path) -> list[Path]:

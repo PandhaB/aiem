@@ -118,6 +118,9 @@ input[type="text"], input[type="file"], input[type="number"], select {
   border: 1px solid var(--line);
   border-radius: 4px;
   background: #fff;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 button, .button {
   display: inline-block;
@@ -163,7 +166,32 @@ th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var
   display: block;
 }
 .job-box progress { width: 100%; }
-#preview { max-width: 100%; border: 1px solid var(--line); }
+.preview-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.preview-nav button { min-width: 2.5rem; }
+#preview-caption { text-align: center; flex: 1; }
+.preview-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  align-items: start;
+}
+.preview-pair figure { margin: 0; }
+.preview-pair figcaption { margin-bottom: 0.35rem; }
+.preview-pair img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border: 1px solid var(--line);
+  background: #1c2430;
+}
+@media (max-width: 700px) {
+  .preview-pair { grid-template-columns: 1fr; }
+}
 kbd {
   display: inline-block;
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

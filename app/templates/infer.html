@@ -13,12 +13,13 @@
       <select id="checkpoint">
         {% if checkpoints %}
           {% for item in checkpoints %}
-          <option value="{{ item.name }}">{{ item.name }}</option>
+          <option value="{{ item.ref }}">{{ item.label }}</option>
           {% endfor %}
         {% else %}
           <option value="">Train first — no checkpoint yet</option>
         {% endif %}
       </select>
+      <span class="muted">Each option is a training run folder plus its weight file.</span>
     </label>
     <fieldset>
       <legend>Image source</legend>
@@ -57,12 +58,28 @@
       <a id="dl-coco" class="button" href="#">Download COCO JSON</a>
     </div>
   </article>
-  <article class="card">
-    <h2>Preview</h2>
-    <img id="preview" alt="Overlay preview will appear here" hidden>
-    <p id="preview-empty" class="muted">Run inference to see a colourised overlay.</p>
-  </article>
 </section>
+<article class="card stack">
+  <h2>Preview</h2>
+  <p id="preview-empty" class="muted">Run inference to compare the original image with the colourised overlay.</p>
+  <div id="preview-stage" hidden>
+    <div class="preview-nav">
+      <button type="button" id="preview-prev" class="secondary" aria-label="Previous image">←</button>
+      <span id="preview-caption" class="muted"></span>
+      <button type="button" id="preview-next" class="secondary" aria-label="Next image">→</button>
+    </div>
+    <div class="preview-pair">
+      <figure>
+        <figcaption class="muted">Original</figcaption>
+        <img id="preview-original" alt="Original image">
+      </figure>
+      <figure>
+        <figcaption class="muted">Overlay</figcaption>
+        <img id="preview-overlay" alt="Inference overlay">
+      </figure>
+    </div>
+  </div>
+</article>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -72,6 +89,9 @@
   const datasetRow = document.getElementById("dataset-row");
   const uploadRow = document.getElementById("upload-row");
   let activeJobId = null;
+  let previewNames = [];
+  let previewIndex = 0;
+  let previewRunId = null;
 
   function selectedSource() {
     return document.querySelector("input[name=source]:checked").value;
@@ -166,13 +186,7 @@
         document.getElementById("dl-overlay").href = `${base}/overlays`;
         document.getElementById("dl-masks").href = `${base}/masks`;
         document.getElementById("dl-coco").href = `${base}/coco`;
-        const previewName = job.result && job.result.preview;
-        if (previewName) {
-          const preview = document.getElementById("preview");
-          preview.src = `/api/projects/${projectId}/runs/${job.id}/overlays/${previewName}`;
-          preview.hidden = false;
-          document.getElementById("preview-empty").hidden = true;
-        }
+        showInferPreview(job);
       },
       onDone: () => {
         startBtn.disabled = !document.getElementById("checkpoint").value;
@@ -186,6 +200,64 @@
     if (!job || job.project_id !== projectId || job.kind !== "infer") return;
     if (job.status !== "queued" && job.status !== "running") return;
     attachInferJob(job.id);
+  });
+
+  function previewList(job) {
+    const result = job && job.result ? job.result : {};
+    if (Array.isArray(result.images) && result.images.length) return result.images;
+    if (result.preview) return [result.preview];
+    return [];
+  }
+
+  function showInferPreview(job) {
+    previewNames = previewList(job);
+    previewRunId = job.id;
+    previewIndex = 0;
+    const stage = document.getElementById("preview-stage");
+    const empty = document.getElementById("preview-empty");
+    if (!previewNames.length) {
+      stage.hidden = true;
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    stage.hidden = false;
+    renderPreview();
+  }
+
+  function renderPreview() {
+    if (!previewRunId || !previewNames.length) return;
+    const name = previewNames[previewIndex];
+    const encoded = encodeURIComponent(name);
+    const base = `/api/projects/${projectId}/runs/${previewRunId}`;
+    document.getElementById("preview-original").src = `${base}/inputs/${encoded}`;
+    document.getElementById("preview-overlay").src = `${base}/overlays/${encoded}`;
+    const caption = document.getElementById("preview-caption");
+    caption.textContent = `${name} · ${previewIndex + 1} / ${previewNames.length}`;
+    const many = previewNames.length > 1;
+    document.getElementById("preview-prev").disabled = !many;
+    document.getElementById("preview-next").disabled = !many;
+  }
+
+  function stepPreview(delta) {
+    if (previewNames.length < 2) return;
+    previewIndex = (previewIndex + delta + previewNames.length) % previewNames.length;
+    renderPreview();
+  }
+
+  document.getElementById("preview-prev").addEventListener("click", () => stepPreview(-1));
+  document.getElementById("preview-next").addEventListener("click", () => stepPreview(1));
+  document.addEventListener("keydown", (event) => {
+    if (event.target && ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
+    if (document.getElementById("preview-stage").hidden) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      stepPreview(-1);
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      stepPreview(1);
+    }
   });
 
   stopBtn.addEventListener("click", async () => {

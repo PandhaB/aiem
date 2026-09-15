@@ -89,6 +89,8 @@ def test_create_upload_annotate_train_infer(client: TestClient) -> None:
     names = {item["name"] for item in weights}
     assert "model_0002.stub.json" in names
     assert "model_0004.stub.json" in names
+    assert all(item["ref"].startswith(train_job["id"] + "/") for item in weights)
+    assert all(train_job["id"] in item["label"] for item in weights)
 
     infer = client.post(
         f"/api/projects/{project_id}/jobs/infer",
@@ -110,6 +112,9 @@ def test_create_upload_annotate_train_infer(client: TestClient) -> None:
     preview_name = client.get(f"/api/projects/{project_id}/annotations").json()["images"][0]["file_name"]
     preview = client.get(f"/api/projects/{project_id}/runs/{run_id}/overlays/{preview_name}")
     assert preview.status_code == 200
+    original = client.get(f"/api/projects/{project_id}/runs/{run_id}/inputs/{preview_name}")
+    assert original.status_code == 200
+    assert preview_name in infer_job["result"]["images"]
 
 
 def test_import_dataset_limit(client: TestClient) -> None:
@@ -168,6 +173,10 @@ def test_engines_models_and_status(client: TestClient) -> None:
     assert created_yolo.status_code == 200
     assert created_yolo.json()["engine"] == "ultralytics"
     assert created_yolo.json()["model"] == "yolov8s-seg"
+    infer_page = client.get(f"/projects/{created_yolo.json()['id']}/infer")
+    assert infer_page.status_code == 200
+    assert 'id="preview-original"' in infer_page.text
+    assert 'id="preview-overlay"' in infer_page.text
     stub_models = client.get("/api/models", params={"engine": "stub"})
     assert stub_models.json()["models"] == []
     datasets = client.get("/api/datasets")
@@ -328,6 +337,37 @@ def test_resume_without_run_or_checkpoint_fails(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+def test_infer_can_select_checkpoint_from_a_specific_run(client: TestClient) -> None:
+    project_id = _stub_project_with_image(client, "Infer Named Run")
+    first = client.post(
+        f"/api/projects/{project_id}/jobs/train",
+        json={"init": "random", "max_iter": 2},
+    )
+    first_job = _wait_job(client, first.json()["id"])
+    assert first_job["status"] == "completed", first_job.get("error")
+    second = client.post(
+        f"/api/projects/{project_id}/jobs/train",
+        json={"init": "random", "max_iter": 4},
+    )
+    second_job = _wait_job(client, second.json()["id"])
+    assert second_job["status"] == "completed", second_job.get("error")
+
+    listed = client.get(f"/api/projects/{project_id}").json()["checkpoints"]
+    first_ref = f"{first_job['id']}/model_0002.stub.json"
+    second_ref = f"{second_job['id']}/model_0004.stub.json"
+    refs = {item["ref"] for item in listed}
+    assert first_ref in refs
+    assert second_ref in refs
+
+    infer = client.post(
+        f"/api/projects/{project_id}/jobs/infer",
+        json={"checkpoint_name": first_ref},
+    )
+    assert infer.status_code == 200
+    infer_job = _wait_job(client, infer.json()["id"])
+    assert infer_job["status"] == "completed", infer_job.get("error")
+
+
 def test_infer_from_dataset_folder(client: TestClient) -> None:
     project_id = _stub_project_with_image(client, "Infer Dataset")
     train = client.post(
@@ -346,8 +386,11 @@ def test_infer_from_dataset_folder(client: TestClient) -> None:
     assert infer_job["status"] == "completed", infer_job.get("error")
     preview = infer_job["result"]["preview"]
     assert preview == "0_0.png"
+    assert "0_0.png" in infer_job["result"]["images"]
     overlay = client.get(f"/api/projects/{project_id}/runs/{infer_job['id']}/overlays/{preview}")
     assert overlay.status_code == 200
+    original = client.get(f"/api/projects/{project_id}/runs/{infer_job['id']}/inputs/{preview}")
+    assert original.status_code == 200
 
 
 def test_infer_upload_uses_run_preview(client: TestClient) -> None:
@@ -372,6 +415,10 @@ def test_infer_upload_uses_run_preview(client: TestClient) -> None:
         f"/api/projects/{project_id}/runs/{infer_job['id']}/overlays/extra.png"
     )
     assert overlay.status_code == 200
+    original = client.get(
+        f"/api/projects/{project_id}/runs/{infer_job['id']}/inputs/extra.png"
+    )
+    assert original.status_code == 200
 
 
 def test_create_project_with_r101_model(client: TestClient) -> None:

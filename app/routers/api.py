@@ -333,6 +333,17 @@ def get_overlay(request: Request, project_id: str, run_id: str, filename: str) -
     return FileResponse(path)
 
 
+@router.get("/projects/{project_id}/runs/{run_id}/inputs/{filename}")
+def get_run_input(request: Request, project_id: str, run_id: str, filename: str) -> FileResponse:
+    record = _project_or_404(request, project_id)
+    run_dir = _safe_run_dir(record.root / "runs", run_id)
+    try:
+        path = _jobs(request).infer_original_path(record, run_dir, filename)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Original image not found.") from exc
+    return FileResponse(path)
+
+
 def _project_payload(request: Request, record) -> dict:
     coco = load_coco(record.annotations_path)
     payload = record.to_dict()

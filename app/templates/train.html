@@ -98,12 +98,9 @@
   </article>
   <article class="card stack" id="curves-panel" hidden>
     <h2>Learning curves</h2>
-    <p class="muted" id="curves-empty">Loss values appear after the first iteration.</p>
+    <p class="muted" id="curves-empty">Loss values appear after the first training step.</p>
     <canvas id="loss-curves" class="curve-canvas" width="900" height="260" hidden></canvas>
-    <p class="muted legend" id="curves-legend" hidden>
-      <span class="swatch swatch-total"></span> Total loss
-      <span class="swatch swatch-mask"></span> Mask loss
-    </p>
+    <p class="muted legend" id="curves-legend" hidden></p>
   </article>
 </section>
 {% endblock %}
