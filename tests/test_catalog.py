@@ -84,9 +84,19 @@ def test_available_models_are_instance_cards() -> None:
         "yolov8s-seg",
         "yolo11n-seg",
         "yolo11s-seg",
+        "yolo26x-seg",
     ]
     assert yolo[1]["family"] == "yolo"
     assert available_models(engine="stub") == []
+
+
+def test_yolo26x_seg_is_curated() -> None:
+    spec = get_model("yolo26x-seg")
+    assert spec.engine == "ultralytics"
+    assert spec.family == "yolo"
+    assert spec.ultralytics_name == "yolo26x-seg"
+    assert spec.checkpoint_filename == "yolo26x-seg.pt"
+    assert spec.checkpoint_url.endswith("/v8.4.0/yolo26x-seg.pt")
 
 
 def test_yolo_cards_use_ultralytics_engine() -> None:

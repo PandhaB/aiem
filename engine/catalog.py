@@ -146,6 +146,17 @@ MODELS: dict[str, ModelSpec] = {
         default_lr=0.01,
         ultralytics_name="yolo11s-seg",
     ),
+    "yolo26x-seg": ModelSpec(
+        id="yolo26x-seg",
+        label="YOLO26x-seg",
+        engine="ultralytics",
+        family="yolo",
+        task="instance",
+        checkpoint_url="https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26x-seg.pt",
+        checkpoint_filename="yolo26x-seg.pt",
+        default_lr=0.01,
+        ultralytics_name="yolo26x-seg",
+    ),
 }
 
 

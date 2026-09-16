@@ -19,7 +19,7 @@
       <select id="model-select"></select>
     </label>
     <p id="vitdet-note" class="muted" hidden>ViTDet keeps a two-stage Mask R-CNN head with a ViT backbone. The input canvas follows your images (rounded up to a multiple of 16, capped at 1024). 256 px TEM tiles stay at 256 — they are not upscaled to the COCO 1024 recipe, which needs ~8–11 GB. Keep batch size 1.</p>
-    <p id="yolo-note" class="muted" hidden>YOLO-seg is a one-stage instance model. Max iterations means <strong>epochs</strong> here (one pass over your images). Nano (n) is lightest; small (s) is a better default on a 6–8 GB GPU. Image size follows your tiles (multiple of 32, capped at 640).</p>
+    <p id="yolo-note" class="muted" hidden>YOLO-seg is a one-stage instance model. Max iterations means <strong>epochs</strong> here (one pass over your images). Nano (n) is lightest; small (s) is a better default on a 6–8 GB GPU. Extra-large (x) may run out of memory on 6 GB — keep batch size 1. Image size follows your tiles (multiple of 32, capped at 640).</p>
     <fieldset>
       <legend>Weight initialisation</legend>
       <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights</label>

@@ -165,7 +165,7 @@ def test_engines_models_and_status(client: TestClient) -> None:
     assert yolo_payload["default"] == "yolov8s-seg"
     assert "segment" in yolo_payload["zoo_url"]
     yolo_ids = [item["id"] for item in yolo_payload["models"]]
-    assert yolo_ids == ["yolov8n-seg", "yolov8s-seg", "yolo11n-seg", "yolo11s-seg"]
+    assert yolo_ids == ["yolov8n-seg", "yolov8s-seg", "yolo11n-seg", "yolo11s-seg", "yolo26x-seg"]
     created_yolo = client.post(
         "/api/projects",
         json={"name": "YOLO Demo", "classes": ["Loop-A"], "engine": "ultralytics"},

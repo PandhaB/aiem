@@ -121,7 +121,13 @@ class UltralyticsEngine:
                 on_progress,
                 0.1 + 0.85 * (epoch_num / epochs),
                 message,
-                log_line=_epoch_log_line(epoch_num, epochs, metrics, trainer, named),
+                log_line=_epoch_log_line(
+                    iteration,
+                    request.start_iter + epochs,
+                    metrics,
+                    trainer,
+                    named,
+                ),
                 iteration=iteration,
                 max_iter=request.start_iter + epochs,
                 eta_seconds=eta,
@@ -132,13 +138,9 @@ class UltralyticsEngine:
                 stopped = True
                 trainer.stop = True
 
-        def on_fit_epoch_end(trainer) -> None:
-            for line in val_table_lines(trainer):
-                self._report(on_progress, None, None, log_line=line)
-
         try:
             model.add_callback("on_train_epoch_end", on_epoch_end)
-            model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
+            init_flags = _yolo_train_init(request.init, request.pretrained_weights_path)
             model.train(
                 data=str(yaml_path),
                 epochs=epochs,
@@ -150,7 +152,8 @@ class UltralyticsEngine:
                 project=str(request.output_dir),
                 name="ultralytics",
                 exist_ok=True,
-                pretrained=request.init == "pretrained",
+                pretrained=init_flags["pretrained"],
+                resume=init_flags["resume"],
                 patience=patience,
                 save_period=save_period,
                 plots=False,
@@ -336,6 +339,24 @@ class UltralyticsEngine:
             on_progress(value, message, **extra)
 
 
+def _yolo_train_init(init: str, weights_path: Path | None) -> dict:
+    """Map product init onto Ultralytics flags.
+
+    ``pretrained=False`` tells Ultralytics to drop checkpoint weights and train
+    from the YAML. Continue-from-run must pass the ``.pt`` path instead, with
+    ``resume=False`` so this stays a new run (weights only, extra epochs).
+    """
+    if init == "checkpoint":
+        if weights_path is None or not Path(weights_path).is_file():
+            raise FileNotFoundError(
+                "Weights were not found. Use public pretrained weights, or choose a previous checkpoint."
+            )
+        return {"pretrained": str(weights_path), "resume": False}
+    if init == "pretrained":
+        return {"pretrained": True, "resume": False}
+    return {"pretrained": False, "resume": False}
+
+
 def ultralytics_data_dir() -> Path:
     """Writable Ultralytics cache (AMP probe weights, settings). Not used as training output."""
     root = Path(os.environ.get("AITEM_WEIGHTS_DIR") or "/tmp/aitem-weights")
@@ -437,80 +458,6 @@ def _epoch_log_line(epoch_num: int, epochs: int, metrics: dict[str, float], trai
     if named is not None:
         parts.append(f"saved {named.name}")
     return "  ".join(parts)
-
-
-def val_table_lines(trainer) -> list[str]:
-    """Ultralytics validation summary (Class / Instances / Box / Mask), one snapshot per epoch."""
-    metrics = getattr(trainer, "metrics", None)
-    if not isinstance(metrics, dict):
-        return []
-    box = [
-        _metric_named(metrics, "precision(B)", "metrics/precision(B)"),
-        _metric_named(metrics, "recall(B)", "metrics/recall(B)"),
-        _metric_named(metrics, "mAP50(B)", "metrics/mAP50(B)"),
-        _metric_named(metrics, "mAP50-95(B)", "metrics/mAP50-95(B)"),
-    ]
-    mask = [
-        _metric_named(metrics, "precision(M)", "metrics/precision(M)"),
-        _metric_named(metrics, "recall(M)", "metrics/recall(M)"),
-        _metric_named(metrics, "mAP50(M)", "metrics/mAP50(M)"),
-        _metric_named(metrics, "mAP50-95(M)", "metrics/mAP50-95(M)"),
-    ]
-    if all(item is None for item in box + mask):
-        return []
-    images, instances = _val_counts(trainer)
-    header = (
-        "Class     Images  Instances      "
-        "Box(P          R      mAP50  mAP50-95)     "
-        "Mask(P          R      mAP50  mAP50-95)"
-    )
-    row = (
-        f"{'all':<9}{images:>8}{instances:>11}      "
-        f"{_fmt_map(box[0]):>6} {_fmt_map(box[1]):>10} {_fmt_map(box[2]):>10} {_fmt_map(box[3]):>10}     "
-        f"{_fmt_map(mask[0]):>6} {_fmt_map(mask[1]):>10} {_fmt_map(mask[2]):>10} {_fmt_map(mask[3]):>10}"
-    )
-    return [header, row]
-
-
-def _metric_named(metrics: dict, *names: str) -> float | None:
-    lookup = {}
-    for key, raw in metrics.items():
-        value = _as_float(raw)
-        if value is None:
-            continue
-        lookup[str(key)] = value
-        lookup[str(key).split("/")[-1]] = value
-    for name in names:
-        if name in lookup:
-            return lookup[name]
-    return None
-
-
-def _val_counts(trainer) -> tuple[str, str]:
-    images, instances = "-", "-"
-    validator = getattr(trainer, "validator", None)
-    if validator is None:
-        return images, instances
-    seen = getattr(validator, "seen", None)
-    if seen is not None:
-        try:
-            images = str(int(seen))
-        except (TypeError, ValueError):
-            pass
-    nt = getattr(getattr(validator, "metrics", None), "nt_per_class", None)
-    if nt is not None:
-        try:
-            total = nt.sum() if hasattr(nt, "sum") else sum(nt)
-            instances = str(int(total))
-        except (TypeError, ValueError):
-            pass
-    return images, instances
-
-
-def _fmt_map(value: float | None) -> str:
-    if value is None:
-        return "-"
-    return f"{value:.3g}"
 
 
 def _loss_map(tloss, loss_names: tuple | list = ()) -> dict[str, float]:
