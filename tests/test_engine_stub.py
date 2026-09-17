@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from PIL import Image
 
@@ -76,6 +77,8 @@ def test_stub_train_and_infer_write_artifacts(tmp_path: Path) -> None:
     coco_text = infer.coco_path.read_text(encoding="utf-8")
     assert "Loop-A" in coco_text
     assert "segmentation" in coco_text
+    payload = json.loads(coco_text)
+    assert len(payload["annotations"]) == 3
 
 
 def test_stub_resume_offsets_iterations(tmp_path: Path) -> None:
@@ -174,3 +177,48 @@ def test_stub_stop_infer(tmp_path: Path) -> None:
     overlays = list((tmp_path / "infer" / "overlays").glob("*.png"))
     assert overlays
     assert len(overlays) < 8
+
+
+def _stub_checkpoint(tmp_path: Path) -> Path:
+    checkpoint = tmp_path / "train" / "model_0001.stub.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text('{"engine": "stub"}', encoding="utf-8")
+    return checkpoint
+
+
+def test_stub_infer_filters_by_score_and_cap(tmp_path: Path) -> None:
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    _write_png(images_dir / "tile.png")
+    checkpoint = _stub_checkpoint(tmp_path)
+    engine = StubEngine()
+
+    by_score = engine.infer(
+        InferRequest(
+            images_dir=images_dir,
+            checkpoint_path=checkpoint,
+            class_names=["Loop-A"],
+            overlay_colors={"Loop-A": "#2a9d8f"},
+            output_dir=tmp_path / "infer-score",
+            score_threshold=0.5,
+        )
+    )
+    scores = [
+        item["score"]
+        for item in json.loads(by_score.coco_path.read_text(encoding="utf-8"))["annotations"]
+    ]
+    assert scores == [1.0, 0.6]
+
+    by_cap = engine.infer(
+        InferRequest(
+            images_dir=images_dir,
+            checkpoint_path=checkpoint,
+            class_names=["Loop-A"],
+            overlay_colors={"Loop-A": "#2a9d8f"},
+            output_dir=tmp_path / "infer-cap",
+            max_detections=1,
+        )
+    )
+    kept = json.loads(by_cap.coco_path.read_text(encoding="utf-8"))["annotations"]
+    assert len(kept) == 1
+    assert kept[0]["score"] == 1.0

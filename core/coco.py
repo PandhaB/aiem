@@ -1,3 +1,9 @@
+"""Minimal COCO JSON used as the product annotation and prediction format.
+
+Polygons are native-resolution pixel coordinates. This is not a full COCO
+toolkit: only the fields the UI and engines actually read are required.
+"""
+
 from __future__ import annotations
 
 import json
@@ -104,17 +110,18 @@ def replace_annotations(coco: dict, annotations: list[dict]) -> dict:
         segmentation = annotation["segmentation"]
         polygon = segmentation[0]
         bbox, area = polygon_bbox_area(polygon)
-        rebuilt.append(
-            {
-                "id": index,
-                "image_id": annotation["image_id"],
-                "category_id": annotation["category_id"],
-                "segmentation": [polygon],
-                "bbox": annotation.get("bbox") or bbox,
-                "area": annotation.get("area") if annotation.get("area") is not None else area,
-                "iscrowd": annotation.get("iscrowd", 0),
-            }
-        )
+        item = {
+            "id": index,
+            "image_id": annotation["image_id"],
+            "category_id": annotation["category_id"],
+            "segmentation": [list(polygon)],
+            "bbox": annotation.get("bbox") or bbox,
+            "area": annotation.get("area") if annotation.get("area") is not None else area,
+            "iscrowd": annotation.get("iscrowd", 0),
+        }
+        if annotation.get("score") is not None:
+            item["score"] = float(annotation["score"])
+        rebuilt.append(item)
     coco["annotations"] = rebuilt
     validate_coco(coco)
     return coco

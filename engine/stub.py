@@ -5,8 +5,9 @@ import math
 import time
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
+from engine.export import PREDICTIONS_NAME, export_instance_visuals, filter_coco_instances
 from engine.types import (
     ExportRequest,
     InferRequest,
@@ -22,7 +23,6 @@ from engine.training import (
 )
 
 CHECKPOINT_SUFFIX = ".stub.json"
-PREDICTIONS_NAME = "predictions.json"
 
 
 class StubEngine:
@@ -168,10 +168,17 @@ class StubEngine:
 
         request.output_dir.mkdir(parents=True, exist_ok=True)
         coco = _synthetic_coco(image_paths, request.class_names)
+        filter_coco_instances(coco, request.score_threshold, request.max_detections)
         coco_path = request.output_dir / PREDICTIONS_NAME
         coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
 
         self._report(on_progress, 0.6, "Exporting masks and overlays")
+        stop = request.should_stop
+
+        def slowing_stop() -> bool:
+            time.sleep(0.02)
+            return bool(stop and stop())
+
         return self.export_predictions(
             ExportRequest(
                 predictions_coco_path=coco_path,
@@ -179,7 +186,8 @@ class StubEngine:
                 overlay_colors=request.overlay_colors,
                 output_dir=request.output_dir,
                 class_names=request.class_names,
-                should_stop=request.should_stop,
+                should_stop=slowing_stop if stop else None,
+                smooth_tolerance=request.smooth_tolerance,
             ),
             on_progress=on_progress,
         )
@@ -189,71 +197,7 @@ class StubEngine:
         request: ExportRequest,
         on_progress: ProgressCallback | None = None,
     ) -> InferResult:
-        if not request.predictions_coco_path.is_file():
-            raise FileNotFoundError(
-                f"Predictions file not found: {request.predictions_coco_path}"
-            )
-        coco = json.loads(request.predictions_coco_path.read_text(encoding="utf-8"))
-        overlay_dir = request.output_dir / "overlays"
-        masks_dir = request.output_dir / "masks"
-        overlay_dir.mkdir(parents=True, exist_ok=True)
-        masks_dir.mkdir(parents=True, exist_ok=True)
-
-        categories = {item["id"]: item["name"] for item in coco.get("categories", [])}
-        anns_by_image: dict[int, list[dict]] = {}
-        for annotation in coco.get("annotations", []):
-            anns_by_image.setdefault(annotation["image_id"], []).append(annotation)
-
-        stopped = False
-        images = coco.get("images", [])
-        for index, image_info in enumerate(images):
-            if request.should_stop is not None:
-                time.sleep(0.02)
-                if request.should_stop():
-                    stopped = True
-                    break
-            image_path = request.images_dir / image_info["file_name"]
-            if not image_path.is_file():
-                raise FileNotFoundError(f"Image not found: {image_path}")
-            image = Image.open(image_path).convert("RGBA")
-            overlay = image.copy()
-            draw = ImageDraw.Draw(overlay, "RGBA")
-            annotations = anns_by_image.get(image_info["id"], [])
-            for instance_index, annotation in enumerate(annotations, start=1):
-                class_name = categories.get(annotation["category_id"], "unknown")
-                color = _parse_hex(
-                    request.overlay_colors.get(class_name, "#e63946")
-                )
-                fill = (*color, 96)
-                outline = (*color, 255)
-                polygon = _flat_to_pairs(annotation["segmentation"][0])
-                draw.polygon(polygon, fill=fill, outline=outline)
-                mask = Image.new("L", image.size, 0)
-                ImageDraw.Draw(mask).polygon(polygon, fill=255)
-                stem = Path(image_info["file_name"]).stem
-                mask.save(masks_dir / f"{stem}_{instance_index:03d}.png")
-            composed = Image.alpha_composite(image, overlay).convert("RGB")
-            composed.save(overlay_dir / image_info["file_name"])
-            if images:
-                self._report(
-                    on_progress,
-                    0.6 + 0.4 * ((index + 1) / len(images)),
-                    f"Exported {image_info['file_name']}",
-                )
-
-        coco_path = request.output_dir / PREDICTIONS_NAME
-        if request.predictions_coco_path.resolve() != coco_path.resolve():
-            coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
-        if stopped:
-            self._report(on_progress, 1.0, "Inference stopped")
-        else:
-            self._report(on_progress, 1.0, "Export complete")
-        return InferResult(
-            coco_path=coco_path,
-            overlay_dir=overlay_dir,
-            masks_dir=masks_dir,
-            stopped=stopped,
-        )
+        return export_instance_visuals(request, on_progress)
 
     @staticmethod
     def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:
@@ -309,24 +253,25 @@ def _synthetic_coco(image_paths: list[Path], class_names: list[str]) -> dict:
         )
         if not categories:
             continue
-        polygon = _center_diamond(width, height)
-        xs = polygon[0::2]
-        ys = polygon[1::2]
-        x_min, y_min = min(xs), min(ys)
-        box_w, box_h = max(xs) - x_min, max(ys) - y_min
-        annotations.append(
-            {
-                "id": next_ann_id,
-                "image_id": image_id,
-                "category_id": categories[0]["id"],
-                "segmentation": [polygon],
-                "bbox": [x_min, y_min, box_w, box_h],
-                "area": box_w * box_h / 2,
-                "iscrowd": 0,
-                "score": 1.0,
-            }
-        )
-        next_ann_id += 1
+        for dx, dy, score in ((0.0, 0.0, 1.0), (width * 0.18, 0.0, 0.6), (0.0, height * 0.18, 0.2)):
+            polygon = _center_diamond(width, height, dx=dx, dy=dy)
+            xs = polygon[0::2]
+            ys = polygon[1::2]
+            x_min, y_min = min(xs), min(ys)
+            box_w, box_h = max(xs) - x_min, max(ys) - y_min
+            annotations.append(
+                {
+                    "id": next_ann_id,
+                    "image_id": image_id,
+                    "category_id": categories[0]["id"],
+                    "segmentation": [polygon],
+                    "bbox": [x_min, y_min, box_w, box_h],
+                    "area": box_w * box_h / 2,
+                    "iscrowd": 0,
+                    "score": score,
+                }
+            )
+            next_ann_id += 1
     return {
         "info": {"description": "Stub instance-segmentation predictions", "version": "0.1"},
         "images": images,
@@ -335,18 +280,7 @@ def _synthetic_coco(image_paths: list[Path], class_names: list[str]) -> dict:
     }
 
 
-def _center_diamond(width: int, height: int) -> list[float]:
-    cx, cy = width / 2, height / 2
+def _center_diamond(width: int, height: int, dx: float = 0.0, dy: float = 0.0) -> list[float]:
+    cx, cy = width / 2 + dx, height / 2 + dy
     rx, ry = width * 0.25, height * 0.25
     return [cx, cy - ry, cx + rx, cy, cx, cy + ry, cx - rx, cy]
-
-
-def _flat_to_pairs(flat: list[float]) -> list[tuple[float, float]]:
-    return [(flat[index], flat[index + 1]) for index in range(0, len(flat), 2)]
-
-
-def _parse_hex(value: str) -> tuple[int, int, int]:
-    text = value.strip().lstrip("#")
-    if len(text) != 6:
-        return (230, 57, 70)
-    return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))

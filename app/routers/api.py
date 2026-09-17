@@ -1,3 +1,9 @@
+"""JSON API used by the browser (create project, save COCO, start train/infer).
+
+These handlers stay engine-agnostic: they pass ``engine`` / ``model`` ids through
+to :class:`core.jobs.JobRunner` and :class:`core.projects.ProjectStore`.
+"""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.coco import load_coco
-from core.jobs import JobError
+from core.jobs import JobError, safe_prediction_filename
 from core.paths import list_image_folders
 from engine.catalog import (
     DEFAULT_ENGINE,
@@ -58,6 +64,10 @@ class InferBody(BaseModel):
     checkpoint_name: str | None = None
     source: str = "project"
     relative_path: str | None = None
+    score_threshold: float | None = Field(default=None, ge=0, le=1)
+    max_detections: int | None = Field(default=None, ge=1)
+    max_image_dimension: int | None = Field(default=None, ge=1)
+    smooth_tolerance: float | None = Field(default=None, gt=0)
 
 
 class ImportDatasetBody(BaseModel):
@@ -242,6 +252,10 @@ def start_infer(request: Request, project_id: str, body: InferBody) -> dict:
             checkpoint_name=body.checkpoint_name,
             source=body.source,
             relative_path=body.relative_path,
+            score_threshold=body.score_threshold,
+            max_detections=body.max_detections,
+            max_image_dimension=body.max_image_dimension,
+            smooth_tolerance=body.smooth_tolerance,
         )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -256,6 +270,10 @@ async def start_infer_upload(
     files: list[UploadFile] = File(...),
     checkpoint_name: str | None = Form(None),
     overlay_colors: str = Form("{}"),
+    score_threshold: str | None = Form(None),
+    max_detections: str | None = Form(None),
+    max_image_dimension: str | None = Form(None),
+    smooth_tolerance: str | None = Form(None),
 ) -> dict:
     _project_or_404(request, project_id)
     try:
@@ -269,6 +287,10 @@ async def start_infer_upload(
             checkpoint_name=checkpoint_name,
             source="upload",
             uploaded_files=uploaded,
+            score_threshold=_optional_form_float(score_threshold),
+            max_detections=_optional_form_int(max_detections),
+            max_image_dimension=_optional_form_int(max_image_dimension),
+            smooth_tolerance=_optional_form_float(smooth_tolerance),
         )
     except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -297,6 +319,47 @@ def stop_job(request: Request, job_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except JobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/runs/{run_id}/predictions")
+def get_predictions(request: Request, project_id: str, run_id: str, file: str | None = None) -> dict:
+    record = _project_or_404(request, project_id)
+    run_dir = _safe_run_dir(record.root / "runs", run_id)
+    try:
+        name = safe_prediction_filename(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = run_dir / "output" / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="COCO predictions not found.")
+    try:
+        return load_coco(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/projects/{project_id}/runs/{run_id}/predictions")
+def put_predictions(
+    request: Request,
+    project_id: str,
+    run_id: str,
+    body: SaveAnnotationsBody,
+    file: str | None = None,
+    rebuild_visuals: bool | None = None,
+) -> dict:
+    _project_or_404(request, project_id)
+    try:
+        return _jobs(request).save_run_predictions(
+            project_id,
+            run_id,
+            body.model_dump(),
+            filename=file,
+            rebuild_visuals=rebuild_visuals,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/runs/{run_id}/download/{kind}")
@@ -369,3 +432,15 @@ def _zip_directory(directory: Path) -> BytesIO:
                 archive.write(path, path.relative_to(directory).as_posix())
     buffer.seek(0)
     return buffer
+
+
+def _optional_form_float(raw: str | None) -> float | None:
+    if raw is None or not str(raw).strip():
+        return None
+    return float(raw)
+
+
+def _optional_form_int(raw: str | None) -> int | None:
+    if raw is None or not str(raw).strip():
+        return None
+    return int(raw)

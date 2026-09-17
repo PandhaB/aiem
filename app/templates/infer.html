@@ -1,7 +1,8 @@
+{# Infer: pick a checkpoint, choose images, poll the job, then preview + download. #}
 {% extends "base.html" %}
 {% block title %}Infer · {{ project.name }}{% endblock %}
 {% block content %}
-<p class="crumb"><a href="/">Projects</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Infer</p>
+<p class="crumb"><a href="/projects">Instance segmentation</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Infer</p>
 <header class="page-head">
   <h1>Infer</h1>
   <p class="muted">Run instance segmentation, then download a colourised overlay, mask files, and COCO JSON. Images can come from this project, a folder under <code>Datasets/</code>, or files you upload for this run only.</p>
@@ -19,7 +20,7 @@
           <option value="">Train first — no checkpoint yet</option>
         {% endif %}
       </select>
-      <span class="muted">Each option is a training run folder plus its weight file.</span>
+      <span class="muted">Each option is a training run plus its weight file. The architecture and input size come from that checkpoint, not from the project.</span>
     </label>
     <fieldset>
       <legend>Image source</legend>
@@ -39,10 +40,29 @@
       <legend>Overlay colours</legend>
       {% for item in project.classes %}
       <label class="choice">{{ item.name }}
+        {# type=color is the native colour picker. value is a #rrggbb string stored on the project. #}
         <input type="color" data-class="{{ item.name }}" value="{{ item.color }}">
       </label>
       {% endfor %}
     </fieldset>
+    <div class="param-grid">
+      <label>Confidence threshold
+        <input type="number" id="score-threshold" min="0" max="1" step="0.05" value="{% if project.engine == 'ultralytics' %}0.25{% else %}0.5{% endif %}">
+      </label>
+      <label>Maximum detections per image
+        <input type="number" id="max-detections" min="1" step="1" value="{% if project.engine == 'ultralytics' %}300{% else %}100{% endif %}">
+      </label>
+      <label>Maximum image dimension
+        <input type="number" id="max-image-dimension" min="1" step="1" placeholder="Checkpoint size">
+      </label>
+    </div>
+    <p class="muted">Keep only detections above this score. Raise the detection cap if objects look missing — Detectron2 otherwise keeps at most 100 per image, YOLO 300.</p>
+    <p class="muted">Leave maximum image dimension empty to use the checkpoint’s inference size (COCO 800 unless you trained with min size 0 = native). Set 1024 to force a 1024 px image at native scale. Uses more GPU memory; this is not tiling.</p>
+    <label class="choice"><input type="checkbox" id="smooth-contours"> Smooth contours after inference</label>
+    <label id="smooth-row" hidden>Vertex tolerance (pixels)
+      <input type="number" id="smooth-tolerance" min="0.5" max="40" step="0.5" value="2">
+    </label>
+    <p class="muted">Drop redundant outline vertices while keeping the overall shape. Higher tolerance means fewer points and a coarser contour. Applied after detection, before overlays.</p>
     <div class="train-actions">
       <button type="button" id="start-infer" {% if not checkpoints %}disabled{% endif %}>Start inference</button>
       <button type="button" id="stop-infer" class="secondary" disabled>Stop inference</button>
@@ -56,6 +76,7 @@
       <a id="dl-overlay" class="button" href="#">Download overlays (zip)</a>
       <a id="dl-masks" class="button" href="#">Download masks (zip)</a>
       <a id="dl-coco" class="button" href="#">Download COCO JSON</a>
+      <a id="refine-link" class="button secondary" hidden href="#">Refine predictions</a>
     </div>
   </article>
 </section>
@@ -70,6 +91,7 @@
     </div>
     <div class="preview-pair">
       <figure>
+        {# src is set in JS to an API URL after the job finishes (original vs overlay). #}
         <figcaption class="muted">Original</figcaption>
         <img id="preview-original" alt="Original image">
       </figure>
@@ -88,6 +110,8 @@
   const stopBtn = document.getElementById("stop-infer");
   const datasetRow = document.getElementById("dataset-row");
   const uploadRow = document.getElementById("upload-row");
+  const smoothRow = document.getElementById("smooth-row");
+  const smoothCheck = document.getElementById("smooth-contours");
   let activeJobId = null;
   let previewNames = [];
   let previewIndex = 0;
@@ -127,10 +151,56 @@
     return overlay_colors;
   }
 
+  function optionalNumber(id) {
+    const raw = document.getElementById(id).value.trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function syncSmooth() {
+    smoothRow.hidden = !smoothCheck.checked;
+  }
+  smoothCheck.addEventListener("change", syncSmooth);
+  syncSmooth();
+
+  function inferLimits() {
+    const limits = {
+      score_threshold: optionalNumber("score-threshold"),
+      max_detections: optionalNumber("max-detections"),
+      max_image_dimension: optionalNumber("max-image-dimension"),
+    };
+    if (smoothCheck.checked) {
+      limits.smooth_tolerance = optionalNumber("smooth-tolerance");
+    }
+    return limits;
+  }
+
   startBtn.addEventListener("click", async () => {
     const error = document.getElementById("job-error");
     error.hidden = true;
     const overlay_colors = overlayColors();
+    const limits = inferLimits();
+    if (limits.score_threshold != null && (limits.score_threshold < 0 || limits.score_threshold > 1)) {
+      error.hidden = false;
+      error.textContent = "Confidence threshold must be between 0 and 1.";
+      return;
+    }
+    if (limits.max_detections != null && limits.max_detections < 1) {
+      error.hidden = false;
+      error.textContent = "Maximum detections must be at least 1.";
+      return;
+    }
+    if (limits.max_image_dimension != null && limits.max_image_dimension < 1) {
+      error.hidden = false;
+      error.textContent = "Maximum image dimension must be at least 1.";
+      return;
+    }
+    if (smoothCheck.checked && (limits.smooth_tolerance == null || limits.smooth_tolerance <= 0)) {
+      error.hidden = false;
+      error.textContent = "Smooth tolerance must be greater than 0.";
+      return;
+    }
     const checkpoint = document.getElementById("checkpoint").value;
     const source = selectedSource();
     let response;
@@ -141,16 +211,26 @@
         error.textContent = "Choose at least one image to upload.";
         return;
       }
+      // Multipart form: files + JSON-as-string fields. Do not set Content-Type; the browser sets the boundary.
       const form = new FormData();
       Array.from(files).forEach((file) => form.append("files", file));
       if (checkpoint) form.append("checkpoint_name", checkpoint);
       form.append("overlay_colors", JSON.stringify(overlay_colors));
+      if (limits.score_threshold != null) form.append("score_threshold", String(limits.score_threshold));
+      if (limits.max_detections != null) form.append("max_detections", String(limits.max_detections));
+      if (limits.max_image_dimension != null) form.append("max_image_dimension", String(limits.max_image_dimension));
+      if (limits.smooth_tolerance != null) form.append("smooth_tolerance", String(limits.smooth_tolerance));
       response = await fetch(`/api/projects/${projectId}/jobs/infer-upload`, {
         method: "POST",
         body: form,
       });
     } else {
-      const body = { overlay_colors, checkpoint_name: checkpoint || null, source };
+      const body = {
+        overlay_colors,
+        checkpoint_name: checkpoint || null,
+        source,
+        ...limits,
+      };
       if (source === "dataset") {
         body.relative_path = document.getElementById("dataset-path").value || null;
       }
@@ -186,6 +266,9 @@
         document.getElementById("dl-overlay").href = `${base}/overlays`;
         document.getElementById("dl-masks").href = `${base}/masks`;
         document.getElementById("dl-coco").href = `${base}/coco`;
+        const refine = document.getElementById("refine-link");
+        refine.href = `/projects/${projectId}/refine?run=${encodeURIComponent(job.id)}`;
+        refine.hidden = false;
         showInferPreview(job);
       },
       onDone: () => {
@@ -228,6 +311,7 @@
   function renderPreview() {
     if (!previewRunId || !previewNames.length) return;
     const name = previewNames[previewIndex];
+    // encodeURIComponent so a name like "tile 1.png" stays one URL path segment.
     const encoded = encodeURIComponent(name);
     const base = `/api/projects/${projectId}/runs/${previewRunId}`;
     document.getElementById("preview-original").src = `${base}/inputs/${encoded}`;

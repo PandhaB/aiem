@@ -1,3 +1,9 @@
+"""Convert project COCO polygons into an Ultralytics-seg folder layout.
+
+v1 keeps a single split: validation reuses train. ``imgsz`` is a multiple of 32
+and follows the tile size (capped at 640) so small TEM images are not upscaled.
+"""
+
 from __future__ import annotations
 
 import json

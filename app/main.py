@@ -1,3 +1,9 @@
+"""FastAPI process: HTML pages, JSON API, static files, one JobRunner.
+
+Compose runs this module via uvicorn. Paths come from ``AITEM_*`` env vars
+(see :mod:`app.config`); they default to ``projects/``, ``Datasets/``, ``weights/``.
+"""
+
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -11,12 +17,13 @@ from core.projects import ProjectStore
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """Wire store + jobs onto the app. Tests call this with a temporary Settings."""
     settings = settings or load_settings()
     settings.projects_dir.mkdir(parents=True, exist_ok=True)
     settings.weights_dir.mkdir(parents=True, exist_ok=True)
 
     application = FastAPI(
-        title="TEM instance segmentation",
+        title="TEM segmentation",
         description="Local tool to annotate, train, and run instance segmentation.",
     )
     application.state.settings = settings

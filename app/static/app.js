@@ -1,3 +1,7 @@
+// Shared helpers loaded on every page (see base.html).
+// window.foo = ... makes a function usable from inline <script> blocks on train/infer.
+
+// Template literals (`...${id}...`) insert values into a string.
 window.jobPageUrl = function jobPageUrl(job) {
   if (!job || !job.project_id) return "/";
   if (job.kind === "train") return `/projects/${job.project_id}/train`;
@@ -6,6 +10,7 @@ window.jobPageUrl = function jobPageUrl(job) {
 };
 
 window.fetchActiveJob = async function fetchActiveJob() {
+  // async/await: wait for the HTTP response without freezing the page.
   const response = await fetch("/api/jobs/active");
   if (!response.ok) return null;
   const payload = await response.json();
@@ -42,6 +47,7 @@ window.watchActiveJob = function watchActiveJob() {
   tick();
 };
 
+// Poll one job until it finishes. ui is a bag of DOM nodes plus optional callbacks.
 window.pollJob = async function pollJob(jobId, ui) {
   ui.box.hidden = false;
   const tick = async () => {
@@ -63,6 +69,7 @@ window.pollJob = async function pollJob(jobId, ui) {
       if (ui.onDone) ui.onDone(job);
       return;
     }
+    // Not done yet: ask again in 400 ms (simple polling; no WebSocket).
     window.setTimeout(tick, 400);
   };
   tick();
@@ -91,6 +98,7 @@ window.drawLossCurves = function drawLossCurves(canvas, history) {
 
   const width = canvas.width;
   const height = canvas.height;
+  // 2D drawing API (lines and text). Not WebGL.
   const ctx = canvas.getContext("2d");
   const pad = { left: 48, right: 16, top: 16, bottom: 36 };
   const plotW = width - pad.left - pad.right;

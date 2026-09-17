@@ -1,3 +1,5 @@
+"""Safe path helpers for user-supplied folders under Datasets/."""
+
 from __future__ import annotations
 
 from pathlib import Path

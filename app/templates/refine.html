@@ -1,0 +1,152 @@
+{# Hand-edit inference polygons. Loads a run's predictions JSON, not project annotations. #}
+{% extends "base.html" %}
+{% block title %}Refine · {{ project.name }}{% endblock %}
+{% block content %}
+<p class="crumb"><a href="/projects">Instance segmentation</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Refine</p>
+<header class="page-head">
+  <div>
+    <h1>Refine</h1>
+    <p class="muted">Correct instance masks from an inference run.
+<!--    <strong>Save copy</strong> writes a new JSON beside the model output. <strong>Overwrite run</strong> replaces <code>predictions.json</code> and rebuilds overlays and masks (Infer downloads then match this edit).</p>-->
+  </div>
+</header>
+{% if not prediction_runs %}
+<section class="card">
+  <p>No inference predictions yet. <a href="/projects/{{ project.id }}/infer">Run inference</a> first, then come back to correct the masks.</p>
+</section>
+{% else %}
+<section class="card param-grid">
+  <label>Inference run
+    <select id="run-select">
+      {% for item in prediction_runs %}
+      <option value="{{ item.id }}" {% if item.id == selected_run_id %}selected{% endif %}>{{ item.id }} — {{ item.status }}{% if item.message %} · {{ item.message }}{% endif %}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Open file
+    <select id="file-select">
+      {% for name in prediction_files %}
+      <option value="{{ name }}" {% if name == selected_file %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</section>
+<section class="refine-tools">
+  <article class="card stack">
+    <h2>Class selection</h2>
+    <label>Class
+      <select id="class-select">
+        {% for item in project.classes %}
+        <option value="{{ item.id }}" data-color="{{ item.color }}">{{ item.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="button" id="delete-instance" class="secondary">Delete instance</button>
+<!--    <p class="muted">A new polygon is stored with score 1.0 (manual). Coordinates stay in native image pixels.</p>-->
+  </article>
+  <article class="card stack">
+    <h2>Save predictions</h2>
+    <label>Save copy as
+      <input type="text" id="save-filename" value="predictions_refined.json" spellcheck="false">
+    </label>
+    <div class="train-actions">
+      <button type="button" id="save-copy-btn">Save copy</button>
+      <button type="button" id="save-overwrite-btn" class="secondary">Overwrite run</button>
+    </div>
+<!--    <p class="muted">A copy keeps <code>predictions.json</code> as the raw model output.</p>-->
+  </article>
+  <article class="card stack">
+    <h2>Smoothing</h2>
+    <label>Tolerance (pixels)
+      <input type="number" id="smooth-tolerance" min="0.5" max="40" step="0.5" value="1">
+    </label>
+    <div class="train-actions">
+      <button type="button" id="smooth-btn" class="secondary">Smooth contours</button>
+      <button type="button" id="smooth-undo-btn" class="secondary" disabled>Undo smooth</button>
+    </div>
+<!--    <p class="muted">Drops vertices that do not change the outline much. Undo restores the contours from before the last Smooth, so you can try another tolerance.</p>-->
+  </article>
+</section>
+<p id="save-status" class="muted"></p>
+<section class="refine-stage">
+  <div class="canvas-wrap card">
+    <canvas id="canvas" width="768" height="768" data-mode="refine" data-project-id="{{ project.id }}" data-run-id="{{ selected_run_id }}" data-file-name="{{ selected_file }}"></canvas>
+  </div>
+  <aside class="refine-side">
+    <section class="card refine-keys">
+      <h2>Keys</h2>
+      <ul class="shortcuts shortcuts-compact">
+        <li><kbd>Click</kbd> select mask</li>
+        <li><kbd>Drag</kbd> move vertex</li>
+        <li><kbd>Click</kbd> edge to add</li>
+        <li><kbd>Del</kbd> remove</li>
+        <li><kbd>Click</kbd> empty: new</li>
+        <li><kbd>Enter</kbd> close</li>
+        <li><kbd>Esc</kbd> cancel</li>
+        <li><kbd>←</kbd> <kbd>→</kbd> image</li>
+        <li><kbd>Shift</kbd> slow (off image too)</li>
+      </ul>
+    </section>
+    <section class="card refine-zoom">
+      <h2>Zoom</h2>
+      <div class="zoom-frame">
+        <canvas id="zoom-canvas" width="280" height="280"></canvas>
+      </div>
+    </section>
+  </aside>
+</section>
+<section class="card">
+  <div class="preview-nav">
+    <button type="button" id="image-prev" class="secondary" aria-label="Previous image">←</button>
+    <h2 id="image-caption">Images</h2>
+    <button type="button" id="image-next" class="secondary" aria-label="Next image">→</button>
+  </div>
+  <ul id="image-list" class="image-strip"></ul>
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+{% if selected_run_id %}
+<script>
+  window.POLYGON_EDITOR = {
+    mode: "refine",
+    projectId: "{{ project.id }}",
+    runId: "{{ selected_run_id }}",
+    fileName: "{{ selected_file }}",
+  };
+</script>
+<script src="/static/annotate.js?v=9"></script>
+<script>
+  const runSelect = document.getElementById("run-select");
+  const fileSelect = document.getElementById("file-select");
+  function refineQuery(runId, fileName) {
+    const params = new URLSearchParams();
+    if (runId) params.set("run", runId);
+    if (fileName) params.set("file", fileName);
+    const text = params.toString();
+    return text ? `?${text}` : "";
+  }
+  runSelect.addEventListener("change", (event) => {
+    const next = refineQuery(event.target.value, null);
+    if (window.polygonEditorDirty) {
+      const ok = window.confirm("Discard unsaved refinements on this file?");
+      if (!ok) {
+        event.target.value = window.POLYGON_EDITOR.runId;
+        return;
+      }
+    }
+    window.location.search = next;
+  });
+  fileSelect.addEventListener("change", (event) => {
+    if (window.polygonEditorDirty) {
+      const ok = window.confirm("Discard unsaved refinements on this file?");
+      if (!ok) {
+        event.target.value = window.POLYGON_EDITOR.fileName;
+        return;
+      }
+    }
+    window.location.search = refineQuery(runSelect.value, event.target.value);
+  });
+</script>
+{% endif %}
+{% endblock %}

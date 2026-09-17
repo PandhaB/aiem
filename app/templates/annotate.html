@@ -1,7 +1,8 @@
+{# Polygon editor. The canvas is filled by annotate.js; this page only provides the layout and class list. #}
 {% extends "base.html" %}
 {% block title %}Annotate · {{ project.name }}{% endblock %}
 {% block content %}
-<p class="crumb"><a href="/">Projects</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Annotate</p>
+<p class="crumb"><a href="/projects">Instance segmentation</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Annotate</p>
 <header class="page-head">
   <h1>Annotate</h1>
 </header>
@@ -11,25 +12,32 @@
     <ul id="image-list" class="image-list"></ul>
   </aside>
   <div class="canvas-wrap card">
-    <canvas id="canvas" width="768" height="768"></canvas>
+    {# width/height are the drawing buffer in pixels. CSS then stretches the element; JS maps clicks back to image pixels. #}
+    <canvas id="canvas" width="768" height="768" data-mode="annotate" data-project-id="{{ project.id }}"></canvas>
   </div>
   <aside class="card stack">
     <label>Class
       <select id="class-select">
         {% for item in project.classes %}
+        {# data-color is a custom HTML attribute; annotate.js reads option.dataset.color. #}
         <option value="{{ item.id }}" data-color="{{ item.color }}">{{ item.name }}</option>
         {% endfor %}
       </select>
     </label>
     <button type="button" id="save-btn">Save COCO</button>
+    <button type="button" id="delete-instance" class="secondary">Delete instance</button>
     <p id="save-status" class="muted"></p>
     <h2>Keys</h2>
+    {# <kbd> is the HTML element for a keyboard key; CSS makes it look like a keycap. #}
     <ul class="shortcuts">
       <li><kbd>Click</kbd> add a vertex</li>
       <li><kbd>Enter</kbd> or <kbd>double-click</kbd> close the polygon</li>
       <li><kbd>Esc</kbd> cancel the shape in progress</li>
       <li><kbd>Click</kbd> a finished polygon to select it</li>
-      <li><kbd>Delete</kbd> or <kbd>Backspace</kbd> remove the selected polygon</li>
+      <li><kbd>Drag</kbd> a white handle to move a vertex</li>
+      <li><kbd>Click</kbd> an edge of the selected polygon to insert a vertex</li>
+      <li><kbd>Delete</kbd> or <kbd>Backspace</kbd> remove the selected polygon (or one vertex if a handle is selected)</li>
+      <li><kbd>Shift</kbd> while moving: slower vertex / pointer (keeps tracking if you leave the image; the system cursor is unchanged)</li>
     </ul>
     <p class="muted">Coordinates are saved in native image pixels (COCO JSON).</p>
   </aside>
@@ -37,7 +45,9 @@
 {% endblock %}
 {% block scripts %}
 <script>
+  {# Shared with annotate.js: that file is static and cannot see Jinja, so we put the id on window first. #}
+  window.POLYGON_EDITOR = { mode: "annotate", projectId: "{{ project.id }}" };
   window.PROJECT_ID = "{{ project.id }}";
 </script>
-<script src="/static/annotate.js"></script>
+<script src="/static/annotate.js?v=9"></script>
 {% endblock %}

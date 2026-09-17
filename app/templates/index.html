@@ -1,70 +1,47 @@
+{# extends: reuse base.html (banner + CSS). This file only fills the blocks. #}
 {% extends "base.html" %}
-{% block title %}Projects{% endblock %}
+{% block title %}Home{% endblock %}
 {% block content %}
-<section class="hero">
-  <h1>Projects</h1>
-  <p>Create a project, import TEM images, draw polygons, then train and run instance segmentation.</p>
-  <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
+<section class="home-hero">
+  <h1>Reproduce a microscopist's expertise</h1>
+  {# home-lead is the manifesto: larger and darker than the paragraph below (see style.css). #}
+  <p class="home-lead">
+    This is not a tool for pointing at interesting objects. A deep-learning model
+    copies how a microscopist outlines the same features, so the result stays
+    reproducible. From image to image, and from one operator to another.
+  </p>
+  <p>
+    The simple idea is to <strong>automate the count</strong>. Instance masks go
+    further than a tally: every object is a contour you can export (COCO JSON and
+    mask files) and reuse later for sizes, densities, or any analysis you already
+    run elsewhere. Currently, the post-processing is up to you. It could be
+    possible to extend the project to include some.
+  </p>
 </section>
 
 <section class="grid-2">
-  <article class="card">
-    <h2>New project</h2>
-    <form id="create-form" class="stack">
-      <label>Name
-        <input type="text" name="name" required placeholder="Dislocation loops">
-      </label>
-      <label>Classes (comma-separated)
-        <input type="text" name="classes" required placeholder="Loop-A, Loop-B, Loop-C">
-      </label>
-      <label>Engine
-        <select name="engine">
-          <option value="detectron2" selected>Detectron2</option>
-          <option value="ultralytics">Ultralytics YOLO</option>
-          <option value="stub">Stub (fake engine, no neural net)</option>
-        </select>
-      </label>
-      <button type="submit">Create project</button>
-      <p id="create-error" class="error" hidden></p>
-    </form>
+  <article class="card workspace-card">
+    <p class="eyebrow">Workspace</p>
+    <h2>Instance segmentation</h2>
+    <p>
+      Annotate TEM images with polygons, train a model on your classes, then run
+      inference with a colour overlay, mask files, and COCO JSON.
+    </p>
+    {# class="button" styles a link like a button; it still navigates with href (no JS). #}
+    <a class="button" href="/projects">Open instance segmentation projects</a>
   </article>
-  <article class="card">
-    <h2>Existing projects</h2>
-    {% if projects %}
-    <ul class="project-list">
-      {% for project in projects %}
-      <li>
-        <a href="/projects/{{ project.id }}">{{ project.name }}</a>
-        <span class="muted">{{ project.engine }} · {{ project.model }} · {{ project.classes | map(attribute='name') | join(', ') }}</span>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="muted">No projects yet.</p>
-    {% endif %}
+  <article class="card home-note">
+    <h2>Compute</h2>
+    <p>
+      Training needs a GPU. If this computer has none, train on a GPU workstation
+      (Thomas, Camilo, another CUDA machine).
+    </p>
+    <p>
+      Inference should run on CPU. Expect roughly a second to a minute per image,
+      depending on its dimensions.
+    </p>
+    {# {{ }} prints a Python value from pages.py (describe_device). #}
+    <p class="muted">This machine: {{ device.device }}</p>
   </article>
 </section>
-{% endblock %}
-{% block scripts %}
-<script>
-  document.getElementById("create-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.target;
-    const error = document.getElementById("create-error");
-    const classes = form.classes.value.split(",").map((item) => item.trim()).filter(Boolean);
-    const body = { name: form.name.value, classes, engine: form.engine.value };
-    const response = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      error.hidden = false;
-      error.textContent = payload.detail || "Could not create the project.";
-      return;
-    }
-    window.location.href = "/projects/" + payload.id;
-  });
-</script>
 {% endblock %}

@@ -1,3 +1,5 @@
+"""Runtime directories. Inside Compose they point at mounted volumes."""
+
 from __future__ import annotations
 
 import os
@@ -7,6 +9,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
+    """Host-visible folders. Weight files are never baked into the Docker image."""
+
     projects_dir: Path
     datasets_dir: Path
     weights_dir: Path

@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 
 from engine.catalog import describe_device, get_model, reject_incompatible_checkpoint
-from engine.export import PREDICTIONS_NAME, export_instance_visuals
+from engine.export import PREDICTIONS_NAME, export_instance_visuals, filter_coco_instances
+from engine.infer_size import native_capped_size
 from engine.training import (
     TrainingStopped,
     checkpoint_filename,
@@ -28,7 +29,11 @@ CHECKPOINT_SUFFIX = ".pt"
 
 
 class UltralyticsEngine:
-    """YOLO instance-segmentation backend. UI must not import this module."""
+    """YOLO instance-segmentation backend (one engine for the Ultralytics family).
+
+    Project COCO is converted with :mod:`engine.yolo_data`. Checkpoints are ``.pt``
+    and are not interchangeable with Detectron2 ``.pth``. UI must not import this.
+    """
 
     def name(self) -> str:
         return "ultralytics"
@@ -70,6 +75,7 @@ class UltralyticsEngine:
         _write_backend_meta(
             request.output_dir,
             {
+                "model": spec.id,
                 "family": spec.family,
                 "imgsz": imgsz,
                 "input_size": imgsz,
@@ -229,12 +235,26 @@ class UltralyticsEngine:
         image_paths = _list_images(request.images_dir)
         if not image_paths:
             raise FileNotFoundError(f"No images found in {request.images_dir}")
-        imgsz = yolo_imgsz(
-            (request.backend_options or {}).get("min_size")
-            or (request.backend_options or {}).get("imgsz"),
-            image_hw(request.images_dir),
-        )
+        if request.max_image_dimension:
+            imgsz = native_capped_size(
+                image_hw(request.images_dir),
+                request.max_image_dimension,
+                step=32,
+                min_value=32,
+            )
+        else:
+            imgsz = yolo_imgsz(
+                (request.backend_options or {}).get("min_size")
+                or (request.backend_options or {}).get("imgsz"),
+                image_hw(request.images_dir),
+            )
         self._report(on_progress, 0.06, f"YOLO image size: {imgsz} px")
+        score_threshold = (
+            0.25 if request.score_threshold is None else float(request.score_threshold)
+        )
+        max_detections = (
+            300 if request.max_detections is None else int(request.max_detections)
+        )
         model = yolo_mod.YOLO(str(request.checkpoint_path))
         request.output_dir.mkdir(parents=True, exist_ok=True)
         coco = {
@@ -262,7 +282,8 @@ class UltralyticsEngine:
             results = model.predict(
                 source=str(image_path),
                 imgsz=imgsz,
-                conf=0.25,
+                conf=score_threshold,
+                max_det=max_detections,
                 retina_masks=True,
                 verbose=False,
             )
@@ -301,6 +322,7 @@ class UltralyticsEngine:
                 f"Predicted {image_path.name}",
             )
 
+        filter_coco_instances(coco, request.score_threshold, request.max_detections)
         coco_path = request.output_dir / PREDICTIONS_NAME
         coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
         result = self.export_predictions(
@@ -311,6 +333,7 @@ class UltralyticsEngine:
                 output_dir=request.output_dir,
                 class_names=request.class_names,
                 should_stop=request.should_stop,
+                smooth_tolerance=request.smooth_tolerance,
             ),
             on_progress=on_progress,
         )

@@ -1,3 +1,9 @@
+"""Resolve an engine id to a :class:`SegmentationEngine` instance.
+
+Real backends are imported only when requested so host pytest can run without
+Detectron2 or Ultralytics installed.
+"""
+
 from __future__ import annotations
 
 from engine.catalog import (
@@ -53,6 +59,10 @@ def model_zoo_url(engine: str | None = None) -> str:
 
 
 def get_engine(name: str) -> SegmentationEngine:
+    """Return a backend for ``name``. Unknown ids raise KeyError.
+
+    Detectron2 and Ultralytics modules are imported here, not at module load.
+    """
     key = (name or DEFAULT_ENGINE).strip()
     if key == "stub":
         return StubEngine()

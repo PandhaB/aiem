@@ -1,3 +1,10 @@
+"""Self-contained project folders: images, COCO polygons, runs, published weights.
+
+``project.json`` stores the *engine*. The architecture card on a checkpoint lives
+in that run's ``backend.json``; ``project.model`` is only the default for a new
+pretrained/random training job.
+"""
+
 from __future__ import annotations
 
 import json
@@ -42,6 +49,7 @@ DEFAULT_COLORS = [
 
 @dataclass
 class ProjectRecord:
+    """One self-contained project folder. ``model`` is only the default card for a new train."""
     id: str
     name: str
     engine: str
@@ -81,6 +89,7 @@ class ProjectRecord:
 
 
 class ProjectStore:
+    """Create and update project folders under ``root`` (Compose: ``/data/projects``)."""
     def __init__(self, root: Path) -> None:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
@@ -233,6 +242,37 @@ class ProjectStore:
             if status_path.is_file():
                 runs.append(json.loads(status_path.read_text(encoding="utf-8")))
         return runs
+
+    def list_prediction_runs(self, project_id: str) -> list[dict]:
+        """Completed or stopped infer runs that still have a ``predictions.json``."""
+        record = self.get(project_id)
+        items = []
+        for run in self.list_runs(project_id):
+            run_id = run.get("id")
+            if run.get("kind") != "infer" or not run_id:
+                continue
+            path = record.runs_dir / Path(str(run_id)).name / "output" / "predictions.json"
+            if path.is_file():
+                items.append(run)
+        return items
+
+    def list_prediction_files(self, project_id: str, run_id: str) -> list[str]:
+        record = self.get(project_id)
+        run_dir = record.runs_dir / Path(str(run_id)).name
+        output = run_dir / "output"
+        if not str(run_dir.resolve()).startswith(str(record.runs_dir.resolve())) or not output.is_dir():
+            return []
+        names = []
+        for path in sorted(output.glob("*.json")):
+            try:
+                load_coco(path)
+            except (ValueError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            names.append(path.name)
+        if "predictions.json" in names:
+            names.remove("predictions.json")
+            names.insert(0, "predictions.json")
+        return names
 
     def list_images(self, project_id: str) -> list[dict]:
         record = self.get(project_id)

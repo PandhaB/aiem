@@ -1,6 +1,8 @@
 import io
+import json
 import time
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -94,20 +96,73 @@ def test_create_upload_annotate_train_infer(client: TestClient) -> None:
 
     infer = client.post(
         f"/api/projects/{project_id}/jobs/infer",
-        json={"overlay_colors": {"Loop-A": "#112233"}},
+        json={
+            "overlay_colors": {"Loop-A": "#112233"},
+            "score_threshold": 0.5,
+            "max_detections": 2,
+            "max_image_dimension": 1024,
+        },
     )
     assert infer.status_code == 200
     infer_job = _wait_job(client, infer.json()["id"])
     assert infer_job["status"] == "completed", infer_job.get("error")
+    assert infer_job["score_threshold"] == 0.5
+    assert infer_job["max_detections"] == 2
+    assert infer_job["max_image_dimension"] == 1024
 
     run_id = infer_job["id"]
     coco = client.get(f"/api/projects/{project_id}/runs/{run_id}/download/coco")
     assert coco.status_code == 200
+    predictions = json.loads(coco.content.decode("utf-8"))
+    assert len(predictions["annotations"]) == 2
     overlays = client.get(f"/api/projects/{project_id}/runs/{run_id}/download/overlays")
     assert overlays.status_code == 200
     assert overlays.headers["content-type"].startswith("application/zip")
     masks = client.get(f"/api/projects/{project_id}/runs/{run_id}/download/masks")
     assert masks.status_code == 200
+    mask_names = ZipFile(io.BytesIO(masks.content)).namelist()
+    assert len(mask_names) == 2
+
+    dashboard = client.get(f"/projects/{project_id}")
+    assert dashboard.status_code == 200
+    assert "grid-2" in dashboard.text
+    assert 'class="grid-3"' not in dashboard.text
+    assert f'href="/projects/{project_id}/refine"' in dashboard.text
+    assert ">Refine<" in dashboard.text
+    assert f'href="/projects/{project_id}/refine?run={run_id}"' in dashboard.text
+
+    refine_page = client.get(f"/projects/{project_id}/refine?run={run_id}")
+    assert refine_page.status_code == 200
+    assert "Refine" in refine_page.text
+    assert 'id="canvas"' in refine_page.text
+    assert "POLYGON_EDITOR" in refine_page.text
+    assert "Class selection" in refine_page.text
+    assert "Save predictions" in refine_page.text
+    assert "Smoothing" in refine_page.text
+    assert "Undo smooth" in refine_page.text
+    assert "refine-tools" in refine_page.text
+    assert 'class="image-strip"' in refine_page.text
+    assert 'id="image-prev"' in refine_page.text
+    assert "shortcuts-compact" in refine_page.text
+    assert "refine-stage" in refine_page.text
+    assert 'id="zoom-canvas"' in refine_page.text
+    assert "slow (off image too)" in refine_page.text
+
+    loaded = client.get(f"/api/projects/{project_id}/runs/{run_id}/predictions")
+    assert loaded.status_code == 200
+    payload = loaded.json()
+    assert len(payload["annotations"]) == 2
+    kept = min(payload["annotations"], key=lambda item: item["score"])
+    saved = client.put(
+        f"/api/projects/{project_id}/runs/{run_id}/predictions",
+        json={"annotations": [kept]},
+    )
+    assert saved.status_code == 200
+    assert len(saved.json()["annotations"]) == 1
+    assert saved.json()["annotations"][0]["score"] == kept["score"]
+    refined_masks = client.get(f"/api/projects/{project_id}/runs/{run_id}/download/masks")
+    assert refined_masks.status_code == 200
+    assert len(ZipFile(io.BytesIO(refined_masks.content)).namelist()) == 1
 
     preview_name = client.get(f"/api/projects/{project_id}/annotations").json()["images"][0]["file_name"]
     preview = client.get(f"/api/projects/{project_id}/runs/{run_id}/overlays/{preview_name}")
@@ -177,6 +232,14 @@ def test_engines_models_and_status(client: TestClient) -> None:
     assert infer_page.status_code == 200
     assert 'id="preview-original"' in infer_page.text
     assert 'id="preview-overlay"' in infer_page.text
+    assert 'id="score-threshold"' in infer_page.text
+    assert 'id="max-detections"' in infer_page.text
+    assert 'id="max-image-dimension"' in infer_page.text
+    assert 'id="refine-link"' in infer_page.text
+    assert 'id="smooth-contours"' in infer_page.text
+    assert 'id="smooth-tolerance"' in infer_page.text
+    assert 'value="0.25"' in infer_page.text
+    assert 'value="300"' in infer_page.text
     stub_models = client.get("/api/models", params={"engine": "stub"})
     assert stub_models.json()["models"] == []
     datasets = client.get("/api/datasets")
@@ -192,7 +255,17 @@ def test_engines_models_and_status(client: TestClient) -> None:
     home = client.get("/")
     assert home.status_code == 200
     assert 'id="active-job-banner"' in home.text
-    assert 'value="ultralytics"' in home.text
+    assert "Reproduce a microscopist's expertise" in home.text
+    assert 'href="/projects"' in home.text
+    assert 'id="create-form"' not in home.text
+    projects = client.get("/projects")
+    assert projects.status_code == 200
+    assert "Instance segmentation projects" in projects.text
+    assert 'value="ultralytics"' in projects.text
+    assert 'id="create-form"' in projects.text
+    missing_page = client.get("/projects/does-not-exist", follow_redirects=False)
+    assert missing_page.status_code == 302
+    assert missing_page.headers["location"] == "/projects"
     idle = client.get("/api/jobs/active")
     assert idle.status_code == 200
     assert idle.json() == {"job": None}
@@ -405,11 +478,17 @@ def test_infer_upload_uses_run_preview(client: TestClient) -> None:
     infer = client.post(
         f"/api/projects/{project_id}/jobs/infer-upload",
         files=[("files", ("extra.png", _png_bytes(), "image/png"))],
-        data={"overlay_colors": '{"Loop-A": "#112233"}'},
+        data={
+            "overlay_colors": '{"Loop-A": "#112233"}',
+            "score_threshold": "0.5",
+            "max_detections": "1",
+        },
     )
     assert infer.status_code == 200
     infer_job = _wait_job(client, infer.json()["id"])
     assert infer_job["status"] == "completed", infer_job.get("error")
+    assert infer_job["score_threshold"] == 0.5
+    assert infer_job["max_detections"] == 1
     assert infer_job["result"]["preview"] == "extra.png"
     overlay = client.get(
         f"/api/projects/{project_id}/runs/{infer_job['id']}/overlays/extra.png"
@@ -419,6 +498,25 @@ def test_infer_upload_uses_run_preview(client: TestClient) -> None:
         f"/api/projects/{project_id}/runs/{infer_job['id']}/inputs/extra.png"
     )
     assert original.status_code == 200
+
+
+def test_infer_rejects_invalid_limits(client: TestClient) -> None:
+    project_id = _stub_project_with_image(client, "Bad Infer Limits")
+    too_high = client.post(
+        f"/api/projects/{project_id}/jobs/infer",
+        json={"score_threshold": 1.5},
+    )
+    assert too_high.status_code == 422
+    too_few = client.post(
+        f"/api/projects/{project_id}/jobs/infer",
+        json={"max_detections": 0},
+    )
+    assert too_few.status_code == 422
+    too_small = client.post(
+        f"/api/projects/{project_id}/jobs/infer",
+        json={"max_image_dimension": 0},
+    )
+    assert too_small.status_code == 422
 
 
 def test_create_project_with_r101_model(client: TestClient) -> None:
@@ -433,6 +531,11 @@ def test_create_project_with_r101_model(client: TestClient) -> None:
     )
     assert created.status_code == 200
     assert created.json()["model"] == "mask_rcnn_r101_fpn"
+    infer_page = client.get(f"/projects/{created.json()['id']}/infer")
+    assert infer_page.status_code == 200
+    assert 'id="score-threshold"' in infer_page.text
+    assert 'value="0.5"' in infer_page.text
+    assert 'value="100"' in infer_page.text
 
 
 def test_train_page_explains_vitdet_native_size(client: TestClient) -> None:
@@ -447,3 +550,149 @@ def test_train_page_explains_vitdet_native_size(client: TestClient) -> None:
     assert "vitdet-note" in html
     assert "not upscaled to the COCO 1024 recipe" in html
     assert "Native image size (max 1024)" in html or "Detectron2 default" in html
+
+
+def test_refine_page_empty_without_predictions(client: TestClient) -> None:
+    created = client.post(
+        "/api/projects",
+        json={"name": "No Infer Yet", "classes": ["Loop-A"], "engine": "stub"},
+    )
+    project_id = created.json()["id"]
+    page = client.get(f"/projects/{project_id}/refine")
+    assert page.status_code == 200
+    assert "No inference predictions yet" in page.text
+    assert 'id="canvas"' not in page.text
+    missing = client.get(f"/api/projects/{project_id}/runs/infer-missing/predictions")
+    assert missing.status_code == 404
+
+
+def test_project_page_folds_long_run_list(client: TestClient) -> None:
+    created = client.post(
+        "/api/projects",
+        json={"name": "Many Runs", "classes": ["Loop-A"], "engine": "stub"},
+    )
+    project_id = created.json()["id"]
+    record = client.app.state.store.get(project_id)
+    for index in range(6):
+        run_id = f"infer-fake-{index:02d}"
+        run_dir = record.runs_dir / run_id
+        run_dir.mkdir()
+        (run_dir / "status.json").write_text(
+            json.dumps(
+                {
+                    "id": run_id,
+                    "kind": "infer",
+                    "status": "completed",
+                    "message": "ok",
+                }
+            ),
+            encoding="utf-8",
+        )
+    page = client.get(f"/projects/{project_id}")
+    assert page.status_code == 200
+    assert "Show 2 more" in page.text
+    assert "<summary>" in page.text
+
+
+def test_put_predictions_rejects_unknown_image(client: TestClient) -> None:
+    project_id = _stub_project_with_image(client, "Refine Bad Image")
+    train = client.post(
+        f"/api/projects/{project_id}/jobs/train",
+        json={"init": "random", "max_iter": 2},
+    )
+    train_job = _wait_job(client, train.json()["id"])
+    assert train_job["status"] == "completed", train_job.get("error")
+    infer = client.post(f"/api/projects/{project_id}/jobs/infer", json={})
+    infer_job = _wait_job(client, infer.json()["id"])
+    assert infer_job["status"] == "completed", infer_job.get("error")
+    run_id = infer_job["id"]
+    bad = client.put(
+        f"/api/projects/{project_id}/runs/{run_id}/predictions",
+        json={
+            "annotations": [
+                {
+                    "image_id": 999,
+                    "category_id": 1,
+                    "segmentation": [[1, 1, 8, 1, 8, 8, 1, 8]],
+                }
+            ]
+        },
+    )
+    assert bad.status_code == 400
+
+
+def _train_and_infer(client: TestClient, name: str, infer_body: dict | None = None) -> tuple[str, str]:
+    project_id = _stub_project_with_image(client, name)
+    train = client.post(
+        f"/api/projects/{project_id}/jobs/train",
+        json={"init": "random", "max_iter": 2},
+    )
+    train_job = _wait_job(client, train.json()["id"])
+    assert train_job["status"] == "completed", train_job.get("error")
+    infer = client.post(f"/api/projects/{project_id}/jobs/infer", json=infer_body or {})
+    infer_job = _wait_job(client, infer.json()["id"])
+    assert infer_job["status"] == "completed", infer_job.get("error")
+    return project_id, infer_job["id"]
+
+
+def test_refine_save_copy_keeps_original_predictions(client: TestClient) -> None:
+    project_id, run_id = _train_and_infer(client, "Save Copy")
+    original = client.get(f"/api/projects/{project_id}/runs/{run_id}/predictions")
+    assert original.status_code == 200
+    original_count = len(original.json()["annotations"])
+    assert original_count >= 1
+    kept = original.json()["annotations"][:1]
+    saved = client.put(
+        f"/api/projects/{project_id}/runs/{run_id}/predictions",
+        params={"file": "predictions_refined.json", "rebuild_visuals": False},
+        json={"annotations": kept},
+    )
+    assert saved.status_code == 200
+    assert len(saved.json()["annotations"]) == 1
+    still_original = client.get(f"/api/projects/{project_id}/runs/{run_id}/predictions")
+    assert len(still_original.json()["annotations"]) == original_count
+    copy = client.get(
+        f"/api/projects/{project_id}/runs/{run_id}/predictions",
+        params={"file": "predictions_refined.json"},
+    )
+    assert copy.status_code == 200
+    assert len(copy.json()["annotations"]) == 1
+    page = client.get(f"/projects/{project_id}/refine?run={run_id}")
+    assert page.status_code == 200
+    assert "predictions_refined.json" in page.text
+    assert "Save copy" in page.text
+    assert "Overwrite run" in page.text
+    assert "Smooth contours" in page.text
+    assert "Undo smooth" in page.text
+    assert "Class selection" in page.text
+    assert "Save predictions" in page.text
+
+
+def test_refine_rejects_unsafe_prediction_filename(client: TestClient) -> None:
+    project_id, run_id = _train_and_infer(client, "Bad Filename")
+    traversal = client.get(
+        f"/api/projects/{project_id}/runs/{run_id}/predictions",
+        params={"file": "../secrets.json"},
+    )
+    assert traversal.status_code == 400
+    reserved = client.put(
+        f"/api/projects/{project_id}/runs/{run_id}/predictions",
+        params={"file": "metrics.json"},
+        json={"annotations": []},
+    )
+    assert reserved.status_code == 400
+
+
+def test_infer_records_smooth_tolerance(client: TestClient) -> None:
+    project_id, run_id = _train_and_infer(
+        client, "Smooth Infer", infer_body={"smooth_tolerance": 2}
+    )
+    job = client.get(f"/api/jobs/{run_id}")
+    assert job.status_code == 200
+    assert job.json()["smooth_tolerance"] == 2
+    too_small = client.post(
+        f"/api/projects/{project_id}/jobs/infer",
+        json={"smooth_tolerance": 0},
+    )
+    assert too_small.status_code == 422
+

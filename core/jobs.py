@@ -1,6 +1,14 @@
+"""One in-process train/infer job at a time, with status on disk under ``runs/``.
+
+The runner picks a backend with :func:`engine.registry.get_engine`, downloads
+public weights into the shared ``weights/`` volume, and copies checkpoints into
+the project ``weights/`` folder. It must not import Detectron2 itself.
+"""
+
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import time
@@ -8,12 +16,20 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.coco import load_coco, replace_annotations, save_coco
 from core.paths import resolve_under
 from core.projects import ProjectStore
-from engine.catalog import DEFAULT_MODEL, checkpoint_suffixes, ensure_pretrained, reject_incompatible_checkpoint
+from engine.catalog import (
+    DEFAULT_MODEL,
+    checkpoint_suffixes,
+    ensure_pretrained,
+    get_model,
+    reject_incompatible_checkpoint,
+)
+from engine.export import PREDICTIONS_NAME, export_instance_visuals
 from engine.registry import get_engine
 from engine.training import format_eta, iteration_from_checkpoint_name
-from engine.types import InferRequest, TrainRequest
+from engine.types import ExportRequest, InferRequest, TrainRequest
 
 
 class JobError(Exception):
@@ -102,11 +118,16 @@ class JobRunner:
             raise ValueError("ims_per_batch must be at least 1.")
         self._ensure_idle()
         record = self.store.get(project_id)
-        if model:
-            record = self.store.update_model(project_id, model)
         resume = None
+        resolved_options = dict(backend_options or {})
         if init == "checkpoint":
             resume = self._resolve_resume(record, resume_run_id, resume_checkpoint)
+            model_id = _model_for_checkpoint(record, resume["checkpoint"], resume_run_id)
+            resolved_options = {**_backend_options_for_checkpoint(resume["checkpoint"]), **resolved_options}
+        else:
+            if model:
+                record = self.store.update_model(project_id, model)
+            model_id = record.model
         run_dir = self._new_run_dir(record.runs_dir, "train")
         start_iter = resume["start_iter"] if resume else 0
         if resume and resume.get("history_path"):
@@ -130,7 +151,7 @@ class JobRunner:
                 "eta_seconds": None,
                 "eta": None,
                 "checkpoints": [],
-                "model": record.model,
+                "model": model_id,
             },
         )
         params = {
@@ -141,8 +162,8 @@ class JobRunner:
             "ims_per_batch": ims_per_batch,
             "start_iter": start_iter,
             "resume_weights": str(resume["checkpoint"]) if resume else None,
-            "backend_options": backend_options or {},
-            "model": record.model,
+            "backend_options": resolved_options,
+            "model": model_id,
         }
         self._submit(self._run_train, record.id, params, run_dir)
         return status
@@ -182,9 +203,21 @@ class JobRunner:
         source: str = "project",
         relative_path: str | None = None,
         uploaded_files: list[tuple[str, bytes]] | None = None,
+        score_threshold: float | None = None,
+        max_detections: int | None = None,
+        max_image_dimension: int | None = None,
+        smooth_tolerance: float | None = None,
     ) -> dict:
         if source not in {"project", "dataset", "upload"}:
             raise ValueError("source must be 'project', 'dataset', or 'upload'.")
+        if score_threshold is not None and not 0 <= score_threshold <= 1:
+            raise ValueError("score_threshold must be between 0 and 1.")
+        if max_detections is not None and max_detections < 1:
+            raise ValueError("max_detections must be at least 1.")
+        if max_image_dimension is not None and max_image_dimension < 1:
+            raise ValueError("max_image_dimension must be at least 1.")
+        if smooth_tolerance is not None and smooth_tolerance <= 0:
+            raise ValueError("smooth_tolerance must be greater than 0.")
         self._ensure_idle()
         record = self.store.get(project_id)
         colors = {item.name: item.color for item in record.classes}
@@ -208,9 +241,25 @@ class JobRunner:
                 "result": None,
                 "source": source,
                 "relative_path": relative_path,
+                "score_threshold": score_threshold,
+                "max_detections": max_detections,
+                "max_image_dimension": max_image_dimension,
+                "smooth_tolerance": smooth_tolerance,
+                "overlay_colors": colors,
             },
         )
-        self._submit(self._run_infer, record.id, colors, checkpoint_name, str(images_dir), run_dir)
+        self._submit(
+            self._run_infer,
+            record.id,
+            colors,
+            checkpoint_name,
+            str(images_dir),
+            score_threshold,
+            max_detections,
+            max_image_dimension,
+            smooth_tolerance,
+            run_dir,
+        )
         return status
 
     def _ensure_idle(self) -> None:
@@ -293,6 +342,7 @@ class JobRunner:
             if init == "checkpoint":
                 pretrained = Path(params["resume_weights"]) if params.get("resume_weights") else None
             elif init == "pretrained" and record.engine in {"detectron2", "ultralytics"}:
+                # A new engine must be listed here or pretrained weights are not downloaded.
                 pretrained = ensure_pretrained(
                     self.shared_weights_dir,
                     model_id,
@@ -360,6 +410,10 @@ class JobRunner:
         overlay_colors: dict[str, str],
         checkpoint_name: str | None,
         images_dir: str,
+        score_threshold: float | None,
+        max_detections: int | None,
+        max_image_dimension: int | None,
+        smooth_tolerance: float | None,
         run_dir: Path,
     ) -> None:
         record = self.store.get(project_id)
@@ -383,6 +437,7 @@ class JobRunner:
             engine = get_engine(record.engine)
             checkpoint = self._resolve_checkpoint(record, checkpoint_name, record.engine)
             reject_incompatible_checkpoint(checkpoint, record.engine)
+            model_id = _model_for_checkpoint(record, checkpoint, checkpoint_name)
             result = engine.infer(
                 InferRequest(
                     images_dir=Path(images_dir),
@@ -390,9 +445,13 @@ class JobRunner:
                     class_names=[item.name for item in record.classes],
                     overlay_colors=overlay_colors,
                     output_dir=run_dir / "output",
-                    model=record.model or DEFAULT_MODEL,
+                    model=model_id,
                     should_stop=stop_event.is_set,
                     backend_options=_backend_options_for_checkpoint(checkpoint),
+                    score_threshold=score_threshold,
+                    max_detections=max_detections,
+                    max_image_dimension=max_image_dimension,
+                    smooth_tolerance=smooth_tolerance,
                 ),
                 on_progress=on_progress,
             )
@@ -502,8 +561,7 @@ class JobRunner:
             return folder
         return record.images_dir
 
-    def infer_original_path(self, record, run_dir: Path, filename: str) -> Path:
-        name = Path(filename).name
+    def infer_images_dir(self, record, run_dir: Path) -> Path:
         status_path = run_dir / "status.json"
         status = _read_json(status_path) if status_path.is_file() else {}
         source = status.get("source") or "project"
@@ -516,10 +574,98 @@ class JobRunner:
             folder = resolve_under(self.datasets_dir, relative)
         else:
             folder = record.images_dir
+        if not folder.is_dir():
+            raise FileNotFoundError("Inference images folder not found.")
+        return folder
+
+    def infer_original_path(self, record, run_dir: Path, filename: str) -> Path:
+        folder = self.infer_images_dir(record, run_dir)
+        name = Path(filename).name
         path = (folder / name).resolve()
         if not str(path).startswith(str(folder.resolve())) or not path.is_file():
             raise FileNotFoundError(name)
         return path
+
+    def save_run_predictions(
+        self,
+        project_id: str,
+        run_id: str,
+        coco: dict,
+        filename: str | None = None,
+        rebuild_visuals: bool | None = None,
+    ) -> dict:
+        """Write refined COCO predictions. Optionally rebuild overlay/mask files.
+
+        Saving to a name other than ``predictions.json`` keeps the model output
+        intact. Overlays and Infer downloads still follow ``predictions.json``.
+        """
+        record = self.store.get(project_id)
+        run_dir = _run_dir(record, run_id)
+        output_dir = run_dir / "output"
+        original_path = output_dir / PREDICTIONS_NAME
+        if not original_path.is_file():
+            raise FileNotFoundError("COCO predictions not found.")
+        name = safe_prediction_filename(filename)
+        target_path = output_dir / name
+        source_path = target_path if target_path.is_file() else original_path
+        existing = load_coco(source_path)
+        image_ids = {item["id"] for item in existing["images"]}
+        category_ids = {item["id"] for item in existing["categories"]}
+        incoming = []
+        for annotation in coco.get("annotations") or []:
+            if annotation.get("image_id") not in image_ids:
+                raise ValueError("Annotation image_id does not match this run.")
+            if annotation.get("category_id") not in category_ids:
+                raise ValueError("Annotation category_id is not in this run.")
+            copy = dict(annotation)
+            if copy.get("score") is None:
+                copy["score"] = 1.0
+            incoming.append(copy)
+        payload = {
+            "info": existing.get("info") or {},
+            "licenses": existing.get("licenses") or [],
+            "images": existing["images"],
+            "categories": existing["categories"],
+            "annotations": incoming,
+        }
+        replace_annotations(payload, incoming)
+        save_coco(target_path, payload)
+
+        should_rebuild = rebuild_visuals if rebuild_visuals is not None else name == PREDICTIONS_NAME
+        if should_rebuild:
+            status_path = run_dir / "status.json"
+            status = _read_json(status_path) if status_path.is_file() else {}
+            colors = status.get("overlay_colors") or {item.name: item.color for item in record.classes}
+            if not isinstance(colors, dict):
+                colors = {item.name: item.color for item in record.classes}
+            masks_dir = output_dir / "masks"
+            if masks_dir.is_dir():
+                for path in masks_dir.iterdir():
+                    if path.is_file():
+                        path.unlink()
+            result = export_instance_visuals(
+                ExportRequest(
+                    predictions_coco_path=target_path,
+                    images_dir=self.infer_images_dir(record, run_dir),
+                    overlay_colors=colors,
+                    output_dir=output_dir,
+                    class_names=[item.name for item in record.classes],
+                )
+            )
+            overlays = (
+                sorted(path.name for path in result.overlay_dir.iterdir() if path.is_file())
+                if result.overlay_dir.is_dir()
+                else []
+            )
+            if status:
+                current = dict(status)
+                result_payload = dict(current.get("result") or {})
+                result_payload["preview"] = overlays[0] if overlays else None
+                result_payload["images"] = overlays
+                current["result"] = result_payload
+                current["message"] = "Predictions refined"
+                self._write_status(run_dir, current)
+        return load_coco(target_path)
 
     def _resolve_resume(self, record, resume_run_id: str | None, resume_checkpoint: str | None) -> dict:
         checkpoint: Path | None = None
@@ -579,6 +725,27 @@ class JobRunner:
         return None
 
 
+def _run_dir(record, run_id: str) -> Path:
+    path = (record.runs_dir / Path(run_id).name).resolve()
+    if not str(path).startswith(str(record.runs_dir.resolve())) or not path.is_dir():
+        raise FileNotFoundError(f"Run not found: {run_id}")
+    return path
+
+
+_PREDICTION_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.json$")
+_RESERVED_PREDICTION_NAMES = {"metrics.json", "backend.json", "status.json"}
+
+
+def safe_prediction_filename(name: str | None) -> str:
+    raw = (name or PREDICTIONS_NAME).strip()
+    text = Path(raw).name
+    if raw != text or not _PREDICTION_FILE_RE.fullmatch(text) or text in _RESERVED_PREDICTION_NAMES:
+        raise ValueError(
+            "Prediction file must be a simple .json name (letters, numbers, dash, underscore)."
+        )
+    return text
+
+
 def _named_file(folder: Path, name: str) -> Path | None:
     if not folder.is_dir():
         return None
@@ -602,7 +769,7 @@ def _latest_named_checkpoint(folder: Path, engine_name: str) -> Path | None:
     return files[-1] if files else None
 
 
-def _backend_options_for_checkpoint(checkpoint: Path) -> dict:
+def _read_checkpoint_sidecar(checkpoint: Path) -> dict:
     sidecar = checkpoint.with_name(f"{checkpoint.stem}.backend.json")
     if not sidecar.is_file():
         sibling = checkpoint.with_name("backend.json")
@@ -613,12 +780,84 @@ def _backend_options_for_checkpoint(checkpoint: Path) -> dict:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
-    if not isinstance(data, dict):
-        return {}
-    size = data.get("input_size") or data.get("min_size")
-    if size:
-        return {"min_size": int(size)}
-    return {}
+    return data if isinstance(data, dict) else {}
+
+
+_SIDECAR_META_KEYS = {"model", "family", "input_size", "img_size", "square_pad"}
+
+
+def _backend_options_for_checkpoint(checkpoint: Path) -> dict:
+    """Replay train-time backend knobs at infer. ``min_size`` 0 (native) must not be dropped."""
+    data = _read_checkpoint_sidecar(checkpoint)
+    options = {
+        key: value
+        for key, value in data.items()
+        if key not in _SIDECAR_META_KEYS and value is not None
+    }
+    if "min_size" not in options:
+        size = data.get("input_size")
+        if size:
+            options["min_size"] = int(size)
+    return options
+
+
+def _model_for_checkpoint(record, checkpoint: Path, checkpoint_ref: str | None = None) -> str:
+    """Architecture card lives on the run/checkpoint, not on the project."""
+    data = _read_checkpoint_sidecar(checkpoint)
+    named = _valid_engine_model(record.engine, data.get("model"))
+    if named:
+        return named
+    family = data.get("family")
+    if family == "vitdet":
+        return "mask_rcnn_vitdet_b"
+    run_dir = _run_dir_for_checkpoint(record, checkpoint, checkpoint_ref)
+    if run_dir is not None:
+        from_run = _model_from_run_dir(run_dir)
+        named = _valid_engine_model(record.engine, from_run)
+        if named:
+            return named
+    return record.model or DEFAULT_MODEL
+
+
+def _valid_engine_model(engine_name: str, model_id: str | None) -> str | None:
+    if not model_id:
+        return None
+    try:
+        spec = get_model(str(model_id))
+    except KeyError:
+        return None
+    if engine_name != "stub" and spec.engine != engine_name:
+        raise ValueError(f"Checkpoint model {spec.id} does not belong to {engine_name}.")
+    return spec.id
+
+
+def _run_dir_for_checkpoint(record, checkpoint: Path, checkpoint_ref: str | None) -> Path | None:
+    if checkpoint_ref:
+        run_id = Path(checkpoint_ref.strip().strip("/").split("/", 1)[0]).name
+        path = record.runs_dir / run_id
+        if path.is_dir():
+            return path
+    try:
+        resolved = checkpoint.resolve()
+        resolved.relative_to(record.runs_dir.resolve())
+    except ValueError:
+        return None
+    if resolved.parent.name == "output":
+        return resolved.parent.parent
+    return None
+
+
+def _model_from_run_dir(run_dir: Path) -> str | None:
+    for path in (run_dir / "status.json", run_dir / "output" / "metrics.json"):
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("model"):
+            return str(payload["model"])
+    return None
 
 
 def _now() -> str:

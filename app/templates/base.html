@@ -1,22 +1,31 @@
 <!DOCTYPE html>
+{#
+  Shell for every page (Jinja inheritance). Child templates fill the blocks
+  below; they do not repeat this header/footer. The visible UI language is English.
+#}
 <html lang="en">
 <head>
+  {# utf-8 so class names and filenames with accents do not break. #}
   <meta charset="utf-8">
+  {# Fit the layout to the phone/laptop width instead of a tiny zoomed-out page. #}
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}TEM instance segmentation{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>{% block title %}TEM segmentation{% endblock %}</title>
+  {# /static/... is served by FastAPI from app/static/, not a separate web server. #}
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
   <header class="top">
-    <a class="brand" href="/">TEM instance segmentation</a>
+    <a class="brand" href="/">TEM segmentation</a>
     <nav>
+      {# hidden is an HTML boolean attribute: the banner exists in the DOM, JS shows it when a job runs. #}
       <a id="active-job-banner" class="job-banner" hidden href="#"></a>
-      <a href="/">Projects</a>
+      <a href="/projects">Instance segmentation</a>
     </nav>
   </header>
   <main class="wrap">
     {% block content %}{% endblock %}
   </main>
+  {# Scripts at the end so the HTML exists before JS looks up elements by id. #}
   <script src="/static/app.js"></script>
   {% block scripts %}{% endblock %}
 </body>

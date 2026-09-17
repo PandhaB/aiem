@@ -1,3 +1,5 @@
+"""HTML routes. ``/`` is the homepage; the instance-segmentation list is ``/projects``."""
+
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -15,10 +17,21 @@ templates = Jinja2Templates(
 
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
-    projects = request.app.state.store.list_projects()
+    """Product homepage (intent). Projects live at ``/projects``."""
     return templates.TemplateResponse(
         request,
         "index.html",
+        {"device": describe_device()},
+    )
+
+
+@router.get("/projects", response_class=HTMLResponse)
+def projects_page(request: Request) -> HTMLResponse:
+    """Instance-segmentation project list and create form."""
+    projects = request.app.state.store.list_projects()
+    return templates.TemplateResponse(
+        request,
+        "projects.html",
         {"projects": projects, "device": describe_device()},
     )
 
@@ -28,8 +41,9 @@ def project_page(request: Request, project_id: str):
     try:
         record = request.app.state.store.get(project_id)
     except FileNotFoundError:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/projects", status_code=302)
     coco = load_coco(record.annotations_path)
+    prediction_runs = request.app.state.store.list_prediction_runs(project_id)
     return templates.TemplateResponse(
         request,
         "project.html",
@@ -39,6 +53,7 @@ def project_page(request: Request, project_id: str):
             "annotation_count": len(coco["annotations"]),
             "checkpoints": request.app.state.store.list_checkpoints(project_id),
             "runs": request.app.state.store.list_runs(project_id),
+            "prediction_run_ids": {item["id"] for item in prediction_runs},
             "device": describe_device(),
         },
     )
@@ -49,7 +64,7 @@ def annotate_page(request: Request, project_id: str):
     try:
         record = request.app.state.store.get(project_id)
     except FileNotFoundError:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/projects", status_code=302)
     return templates.TemplateResponse(
         request,
         "annotate.html",
@@ -62,7 +77,7 @@ def train_page(request: Request, project_id: str):
     try:
         record = request.app.state.store.get(project_id)
     except FileNotFoundError:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/projects", status_code=302)
     runs = request.app.state.store.list_runs(project_id)
     train_runs = [
         item
@@ -86,7 +101,7 @@ def infer_page(request: Request, project_id: str):
     try:
         record = request.app.state.store.get(project_id)
     except FileNotFoundError:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/projects", status_code=302)
     return templates.TemplateResponse(
         request,
         "infer.html",
@@ -94,5 +109,43 @@ def infer_page(request: Request, project_id: str):
             "project": record,
             "checkpoints": request.app.state.store.list_checkpoints(project_id),
             "device": describe_device(),
+        },
+    )
+
+
+@router.get("/projects/{project_id}/refine", response_class=HTMLResponse)
+def refine_page(request: Request, project_id: str, run: str | None = None, file: str | None = None):
+    try:
+        record = request.app.state.store.get(project_id)
+    except FileNotFoundError:
+        return RedirectResponse("/projects", status_code=302)
+    prediction_runs = request.app.state.store.list_prediction_runs(project_id)
+    selected = Path(run).name if run else None
+    if selected and not any(item.get("id") == selected for item in prediction_runs):
+        selected = None
+    if selected is None and prediction_runs:
+        selected = prediction_runs[0]["id"]
+    prediction_files = (
+        request.app.state.store.list_prediction_files(project_id, selected) if selected else []
+    )
+    selected_file = Path(file).name if file else None
+    if selected_file and selected_file not in prediction_files:
+        selected_file = None
+    if selected_file is None:
+        if "predictions_refined.json" in prediction_files:
+            selected_file = "predictions_refined.json"
+        elif prediction_files:
+            selected_file = prediction_files[0]
+        else:
+            selected_file = "predictions.json"
+    return templates.TemplateResponse(
+        request,
+        "refine.html",
+        {
+            "project": record,
+            "prediction_runs": prediction_runs,
+            "selected_run_id": selected,
+            "prediction_files": prediction_files,
+            "selected_file": selected_file,
         },
     )

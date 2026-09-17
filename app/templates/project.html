@@ -1,65 +1,17 @@
+{# One project dashboard: counts, upload, links to annotate/train/infer. #}
 {% extends "base.html" %}
 {% block title %}{{ project.name }}{% endblock %}
 {% block content %}
-<p class="crumb"><a href="/">Projects</a> / {{ project.name }}</p>
-<header class="page-head">
-  <div>
-    <h1>{{ project.name }}</h1>
-    <p class="muted">Engine: {{ project.engine }} · Model: {{ project.model }} · {{ project.classes | map(attribute='name') | join(', ') }}</p>
-    <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
-  </div>
-  <nav class="actions">
-    <a class="button" href="/projects/{{ project.id }}/annotate">Annotate</a>
-    <a class="button" href="/projects/{{ project.id }}/train">Train</a>
-    <a class="button" href="/projects/{{ project.id }}/infer">Infer</a>
-  </nav>
-</header>
-
-<section class="grid-3">
-  <article class="card">
-    <h2>Images</h2>
-    <p class="stat">{{ image_count }}</p>
-    <form id="upload-form" class="stack">
-      <input type="file" name="files" accept="image/*" multiple>
-      <button type="submit">Upload images</button>
-    </form>
-    <button type="button" id="import-ds1" class="secondary">Import 8 tiles from DS-1</button>
-    <p id="import-status" class="muted"></p>
-  </article>
-  <article class="card">
-    <h2>Polygons</h2>
-    <p class="stat">{{ annotation_count }}</p>
-    <p>Saved as COCO JSON in the project folder.</p>
-  </article>
-  <article class="card">
-    <h2>Checkpoints</h2>
-    {% if checkpoints %}
-    <ul>
-      {% for item in checkpoints %}
-      <li><code>{{ item.label }}</code></li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="muted">Train to produce a checkpoint. Weight files stay on the host, not in the Docker image.</p>
-    {% endif %}
-  </article>
-</section>
-
-<section class="card">
-  <h2>Recent runs</h2>
-  {% if runs %}
-  <table>
-    <thead>
-      <tr><th>Run</th><th>Kind</th><th>Status</th><th>Message</th></tr>
-    </thead>
-    <tbody>
-      {% for run in runs %}
+{# Reused for the first rows and the folded remainder of Recent runs. #}
+{% macro run_row(run) %}
       <tr>
         <td>
           {% if run.status in ["queued", "running"] and run.kind == "train" %}
           <a href="/projects/{{ project.id }}/train"><code>{{ run.id }}</code></a>
           {% elif run.status in ["queued", "running"] and run.kind == "infer" %}
           <a href="/projects/{{ project.id }}/infer"><code>{{ run.id }}</code></a>
+          {% elif run.kind == "infer" and run.id in prediction_run_ids %}
+          <a href="/projects/{{ project.id }}/refine?run={{ run.id }}"><code>{{ run.id }}</code></a>
           {% else %}
           <code>{{ run.id }}</code>
           {% endif %}
@@ -68,9 +20,96 @@
         <td>{{ run.status }}</td>
         <td>{{ run.message }}</td>
       </tr>
+{% endmacro %}
+<p class="crumb"><a href="/projects">Instance segmentation</a> / {{ project.name }}</p>
+<header class="page-head">
+  <div>
+    <h1>{{ project.name }}</h1>
+    <p class="muted">Engine: {{ project.engine }} · {{ project.classes | map(attribute='name') | join(', ') }}</p>
+    <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
+  </div>
+  <nav class="actions">
+    <a class="button" href="/projects/{{ project.id }}/annotate">Annotate</a>
+    <a class="button" href="/projects/{{ project.id }}/train">Train</a>
+    <a class="button" href="/projects/{{ project.id }}/infer">Infer</a>
+    <a class="button" href="/projects/{{ project.id }}/refine">Refine</a>
+  </nav>
+</header>
+
+{# Images + Polygons stay on one row. Checkpoints and runs sit full-width below. #}
+{% set fold_after = 4 %}
+<section class="grid-2">
+  <article class="card">
+    <h2>Images</h2>
+    <p class="stat">{{ image_count }}</p>
+    <form id="upload-form" class="stack">
+      {# multiple: several files in one request. accept= filters the picker; the API still checks the suffix. #}
+      <input type="file" name="files" accept="image/*" multiple>
+      <button type="submit">Upload images</button>
+    </form>
+    {# type="button" so this is not treated as a second submit of the upload form. #}
+    <button type="button" id="import-ds1" class="secondary">Import 8 tiles from DS-1</button>
+    <p id="import-status" class="muted"></p>
+  </article>
+  <article class="card">
+    <h2>Polygons</h2>
+    <p class="stat">{{ annotation_count }}</p>
+    <p>Saved as COCO JSON in the project folder.</p>
+  </article>
+</section>
+
+<section class="card">
+  <h2>Checkpoints</h2>
+  {% if checkpoints %}
+  <ul class="item-list">
+    {% for item in checkpoints[:fold_after] %}
+    <li><code>{{ item.label }}</code></li>
+    {% endfor %}
+  </ul>
+  {% if checkpoints|length > fold_after %}
+  <details class="fold">
+    <summary>Show {{ checkpoints|length - fold_after }} more</summary>
+    <ul class="item-list">
+      {% for item in checkpoints[fold_after:] %}
+      <li><code>{{ item.label }}</code></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  {% else %}
+  <p class="muted">Train to produce a checkpoint. Weight files stay on the host, not in the Docker image.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Recent runs</h2>
+  {% if runs %}
+  <table>
+    {# Semantic table: header row then one body row per job. Live jobs link to train/infer. #}
+    <thead>
+      <tr><th>Run</th><th>Kind</th><th>Status</th><th>Message</th></tr>
+    </thead>
+    <tbody>
+      {% for run in runs[:fold_after] %}
+      {{ run_row(run) }}
       {% endfor %}
     </tbody>
   </table>
+  {% if runs|length > fold_after %}
+  <details class="fold">
+    <summary>Show {{ runs|length - fold_after }} more</summary>
+    <table>
+      <thead>
+        <tr><th>Run</th><th>Kind</th><th>Status</th><th>Message</th></tr>
+      </thead>
+      <tbody>
+        {% for run in runs[fold_after:] %}
+        {{ run_row(run) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
   {% else %}
   <p class="muted">No train or infer jobs yet.</p>
   {% endif %}
@@ -85,11 +124,13 @@
 {% endblock %}
 {% block scripts %}
 <script>
+  {# Jinja runs first: this becomes a real JS string like const projectId = "loops-tem"; #}
   const projectId = "{{ project.id }}";
   document.getElementById("upload-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = event.target.files;
     if (!input.files.length) return;
+    // FormData: multipart upload. JSON cannot carry binary files.
     const body = new FormData();
     for (const file of input.files) body.append("files", file);
     const response = await fetch(`/api/projects/${projectId}/images`, { method: "POST", body });
@@ -115,6 +156,7 @@
     window.location.reload();
   });
   document.getElementById("delete-project").addEventListener("click", async () => {
+    // confirm() is a blocking browser dialog. Nothing is deleted unless the user agrees.
     const confirmed = window.confirm(
       "Delete this project and all of its data (images, annotations, runs, weights)? This cannot be undone."
     );
@@ -127,7 +169,7 @@
       error.textContent = payload.detail || "Could not delete the project.";
       return;
     }
-    window.location.href = "/";
+    window.location.href = "/projects";
   });
 </script>
 {% endblock %}

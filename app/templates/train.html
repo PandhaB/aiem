@@ -1,26 +1,30 @@
+{# Train form: start a background job, poll status.json via app.js, draw loss curves. #}
 {% extends "base.html" %}
 {% block title %}Train · {{ project.name }}{% endblock %}
 {% block content %}
-<p class="crumb"><a href="/">Projects</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Train</p>
+<p class="crumb"><a href="/projects">Instance segmentation</a> / <a href="/projects/{{ project.id }}">{{ project.name }}</a> / Train</p>
 <header class="page-head">
   <h1>Train</h1>
   {% if project.engine == "stub" %}
   <p class="muted">This project uses the stub engine. It writes a fake checkpoint so you can test the job flow. No neural network is trained.</p>
+  {# elif / else: mutually exclusive engine blurbs. stub vs ultralytics vs detectron2 (the default). #}
   {% elif project.engine == "ultralytics" %}
-  <p class="muted">Engine: Ultralytics YOLO · current model: <code>{{ project.model }}</code>. Public COCO-seg weights are downloaded into the host <code>weights/</code> folder, not into the Docker image. <a id="zoo-link" href="https://docs.ultralytics.com/tasks/segment/" target="_blank" rel="noreferrer">Ultralytics segmentation docs</a></p>
+  <p class="muted">Engine: Ultralytics YOLO. The architecture card is chosen for this run (or read from the checkpoint when continuing). Public COCO-seg weights are downloaded into the host <code>weights/</code> folder, not into the Docker image. <a id="zoo-link" href="https://docs.ultralytics.com/tasks/segment/" target="_blank" rel="noreferrer">Ultralytics segmentation docs</a></p>
   {% else %}
-  <p class="muted">Engine: Detectron2 · current model: <code>{{ project.model }}</code>. Public COCO weights are downloaded into the host <code>weights/</code> folder, not into the Docker image. <a id="zoo-link" href="https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md" target="_blank" rel="noreferrer">Detectron2 Model Zoo</a></p>
+  <p class="muted">Engine: Detectron2. The architecture card is chosen for this run (or read from the checkpoint when continuing). Public COCO weights are downloaded into the host <code>weights/</code> folder, not into the Docker image. <a id="zoo-link" href="https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md" target="_blank" rel="noreferrer">Detectron2 Model Zoo</a></p>
   {% endif %}
   <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
 </header>
 <section class="stack">
   <article class="card stack">
     <label id="model-row" {% if project.engine == "stub" %}hidden{% endif %}>Model
+      {# Options are filled by JS from GET /api/models?engine=... so the HTML does not hard-code the zoo. #}
       <select id="model-select"></select>
     </label>
     <p id="vitdet-note" class="muted" hidden>ViTDet keeps a two-stage Mask R-CNN head with a ViT backbone. The input canvas follows your images (rounded up to a multiple of 16, capped at 1024). 256 px TEM tiles stay at 256 — they are not upscaled to the COCO 1024 recipe, which needs ~8–11 GB. Keep batch size 1.</p>
     <p id="yolo-note" class="muted" hidden>YOLO-seg is a one-stage instance model. Max iterations means <strong>epochs</strong> here (one pass over your images). Nano (n) is lightest; small (s) is a better default on a 6–8 GB GPU. Extra-large (x) may run out of memory on 6 GB — keep batch size 1. Image size follows your tiles (multiple of 32, capped at 640).</p>
     <fieldset>
+      {# Same name="init" on every radio: the browser keeps only one checked. JS reads :checked. #}
       <legend>Weight initialisation</legend>
       <label class="choice"><input type="radio" name="init" value="pretrained" checked> Public pretrained weights</label>
       <label class="choice"><input type="radio" name="init" value="random"> Random weights</label>
@@ -64,6 +68,7 @@
     <p id="train-steps-help" class="muted">When continuing a run, max iterations are <strong>additional</strong> steps. The previous run folder is left unchanged. Leave “save every N” empty to keep only the last weights (and a save if you stop). Keep the batch size at 1 if GPU memory is tight.</p>
     {% if project.engine != "stub" %}
     <details class="fold">
+      {# <details> is native HTML: click <summary> to expand. No JS required for open/close. #}
       <summary>Advanced training options</summary>
       <div class="param-grid">
         <label id="anchor-sizes-row">Anchor sizes
@@ -72,14 +77,27 @@
         <label id="anchor-ratios-row">Anchor aspect ratios
           <input type="text" id="anchor-aspect-ratios" placeholder="0.5, 1, 2">
         </label>
-        <label id="min-size-row">Minimum image size
-          <input type="number" id="min-size" min="1" step="1" placeholder="Detectron2 default">
+        <label id="min-size-row"><span id="min-size-label">Minimum image size</span>
+          <input type="number" id="min-size" min="0" step="1" placeholder="Detectron2 default">
+        </label>
+        <label id="max-size-row" hidden>Train max. size
+          <input type="number" id="max-size" min="1" step="1" placeholder="1333">
+        </label>
+        <label id="min-size-test-row" hidden>Inference min. size
+          <input type="number" id="min-size-test" min="0" step="1" placeholder="Same as train">
+        </label>
+        <label id="max-size-test-row" hidden>Inference max. size
+          <input type="number" id="max-size-test" min="1" step="1" placeholder="Same as train">
+        </label>
+        <label id="rpn-post-nms-row" hidden>RPN post-NMS top-k (test)
+          <input type="number" id="rpn-post-nms-topk-test" min="1" step="1" placeholder="1000">
         </label>
         <label id="patience-row" hidden>Early-stop patience (epochs)
           <input type="number" id="patience" min="0" step="1" placeholder="0 = disabled">
         </label>
       </div>
-      <p id="adv-size-help" class="muted">Leave these empty to keep the model card defaults. Anchor fields apply to Mask R-CNN (R50 / R101 / X101). Smaller anchors can help with tiny loops; a larger min size keeps more native resolution (and uses more GPU memory).</p>
+      <p id="adv-size-help" class="muted">Leave these empty to keep the model card defaults. Anchor fields apply to Mask R-CNN (R50 / R101 / X101). Smaller anchors can help with tiny loops. Mask R-CNN otherwise resizes the shortest edge to 800 px — set train (and inference) min size to 0 to keep native pixels.</p>
+      <p id="adv-size-help" class="muted">Thomas X101 : 8, 16, 32, 64, 128 ; 0.1, 0.2, 0.5, 1, 2, 5, 10 ; 0 ; 99999 ; 0 ; 99999 ; 2000.</p>
     </details>
     {% endif %}
     <div class="train-actions">
@@ -88,17 +106,20 @@
     </div>
     <div id="job-box" class="job-box" hidden>
       <p><strong id="job-status">queued</strong> — <span id="job-message"></span></p>
+      {# progress 0–1 matches JobRunner.progress. JS sets .value as the job runs. #}
       <progress id="job-progress" max="1" value="0"></progress>
     </div>
     <p id="job-error" class="error" hidden></p>
   </article>
   <article class="card stack" id="live-panel" hidden>
     <h2>Training log</h2>
+    {# <pre> keeps spaces/newlines. aria-live lets a screen reader hear new log lines. #}
     <pre id="train-log" class="terminal" aria-live="polite"></pre>
   </article>
   <article class="card stack" id="curves-panel" hidden>
     <h2>Learning curves</h2>
     <p class="muted" id="curves-empty">Loss values appear after the first training step.</p>
+    {# Chart buffer is 900×260; CSS scales it to the card width. app.js draws with Canvas 2D. #}
     <canvas id="loss-curves" class="curve-canvas" width="900" height="260" hidden></canvas>
     <p class="muted legend" id="curves-legend" hidden></p>
   </article>
@@ -149,15 +170,27 @@
     const sizes = document.getElementById("anchor-sizes-row");
     const ratios = document.getElementById("anchor-ratios-row");
     const patience = document.getElementById("patience-row");
+    const maxSize = document.getElementById("max-size-row");
+    const minSizeTest = document.getElementById("min-size-test-row");
+    const maxSizeTest = document.getElementById("max-size-test-row");
+    const rpnPost = document.getElementById("rpn-post-nms-row");
     if (sizes) sizes.hidden = !mask;
     if (ratios) ratios.hidden = !mask;
+    if (maxSize) maxSize.hidden = !mask;
+    if (minSizeTest) minSizeTest.hidden = !mask;
+    if (maxSizeTest) maxSizeTest.hidden = !mask;
+    if (rpnPost) rpnPost.hidden = !mask;
     if (patience) patience.hidden = !yolo;
     const vitNote = document.getElementById("vitdet-note");
     const yoloNote = document.getElementById("yolo-note");
     if (vitNote) vitNote.hidden = meta.family !== "vitdet";
     if (yoloNote) yoloNote.hidden = !yolo;
     const minSize = document.getElementById("min-size");
+    const minSizeLabel = document.getElementById("min-size-label");
     const sizeHelp = document.getElementById("adv-size-help");
+    if (minSizeLabel) {
+      minSizeLabel.textContent = mask ? "Train min. size" : "Minimum image size";
+    }
     if (minSize) {
       if (yolo) {
         minSize.placeholder = "Native image size (max 640)";
@@ -168,8 +201,8 @@
         minSize.min = "16";
         minSize.step = "16";
       } else {
-        minSize.placeholder = "Detectron2 default";
-        minSize.min = "1";
+        minSize.placeholder = "800 (0 = native)";
+        minSize.min = "0";
         minSize.step = "1";
       }
     }
@@ -195,7 +228,7 @@
       } else if (meta.family === "vitdet") {
         sizeHelp.textContent = "Leave min size empty to train at native tile size (multiple of 16, max 1024). Set 1024 only for the COCO recipe — that upscales small TEM tiles and needs much more GPU memory. Anchors do not apply to ViTDet.";
       } else {
-        sizeHelp.textContent = "Leave these empty to keep the model card defaults. Anchor fields apply to Mask R-CNN (R50 / R101 / X101). Smaller anchors can help with tiny loops; a larger min size keeps more native resolution (and uses more GPU memory).";
+        sizeHelp.textContent = "Leave these empty to keep the COCO zoo defaults (shortest edge 800, max 1333, anchors 32–512, RPN post-NMS 1000). That upscales 256 px tiles to 800 and resizes a 1024 px image to 800 at infer. Set train min size to 0 to keep native pixels; inference min size follows train when empty. Use 0 on both for 256-train / 1024-infer at the same nm/pixel. TEM-style anchors: 8, 16, 32, 64, 128, 256.";
       }
     }
     if (!lrInput.dataset.touched) {
@@ -219,12 +252,14 @@
       groups[family].push(model);
     });
     Object.keys(groups).forEach((family) => {
+      // optgroup: labelled cluster in the dropdown (Mask R-CNN vs ViTDet vs YOLO).
       const optgroup = document.createElement("optgroup");
       optgroup.label = familyLabels[family] || family;
       groups[family].forEach((model) => {
         const option = document.createElement("option");
         option.value = model.id;
         option.textContent = model.label;
+        // dataset.family is read later to show/hide ViTDet vs YOLO notes and anchors.
         option.dataset.family = model.family || "";
         if (model.default_lr != null) option.dataset.defaultLr = String(model.default_lr);
         if (model.id === projectModel) option.selected = true;
@@ -245,12 +280,22 @@
     });
   });
   lrInput.addEventListener("input", () => {
+    // dataset.touched: remember the user typed a LR so syncModelUi will not overwrite it.
     lrInput.dataset.touched = "1";
   });
   if (maxIterInput) {
     maxIterInput.addEventListener("input", () => {
       maxIterInput.dataset.touched = "1";
     });
+  }
+
+  function parseOptionalNumber(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const text = String(el.value || "").trim();
+    if (!text) return null;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : null;
   }
 
   startBtn.addEventListener("click", async () => {
@@ -275,9 +320,17 @@
         const ratios = parseNumberList(document.getElementById("anchor-aspect-ratios").value);
         if (sizes.length) backend_options.anchor_sizes = sizes;
         if (ratios.length) backend_options.anchor_aspect_ratios = ratios;
+        const maxSize = parseOptionalNumber("max-size");
+        const minSizeTest = parseOptionalNumber("min-size-test");
+        const maxSizeTest = parseOptionalNumber("max-size-test");
+        const rpnPost = parseOptionalNumber("rpn-post-nms-topk-test");
+        if (maxSize !== null) backend_options.max_size = maxSize;
+        if (minSizeTest !== null) backend_options.min_size_test = minSizeTest;
+        if (maxSizeTest !== null) backend_options.max_size_test = maxSizeTest;
+        if (rpnPost !== null) backend_options.rpn_post_nms_topk_test = rpnPost;
       }
-      const minSize = document.getElementById("min-size") && document.getElementById("min-size").value;
-      if (minSize) backend_options.min_size = Number(minSize);
+      const minSize = parseOptionalNumber("min-size");
+      if (minSize !== null) backend_options.min_size = minSize;
       if (meta.family === "yolo") {
         const patience = document.getElementById("patience") && document.getElementById("patience").value;
         if (patience) backend_options.patience = Number(patience);
@@ -308,6 +361,7 @@
     stopBtn.disabled = false;
     document.getElementById("live-panel").hidden = false;
     document.getElementById("curves-panel").hidden = false;
+    // pollJob (app.js) hits /api/jobs/<id> until completed/failed/stopped.
     window.pollJob(jobId, {
       box: document.getElementById("job-box"),
       status: document.getElementById("job-status"),

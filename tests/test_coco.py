@@ -31,3 +31,22 @@ def test_coco_roundtrip_keeps_polygons_and_classes(tmp_path: Path) -> None:
     bbox, area = polygon_bbox_area(polygon)
     assert bbox[2] == 9
     assert area > 0
+    assert "score" not in loaded["annotations"][0]
+
+
+def test_replace_annotations_keeps_prediction_score() -> None:
+    classes = [ClassSpec(id=1, name="Loop-A", color="#e63946")]
+    coco = empty_coco(classes)
+    coco["images"].append({"id": 1, "file_name": "a.png", "width": 32, "height": 32})
+    replace_annotations(
+        coco,
+        [
+            {
+                "image_id": 1,
+                "category_id": 1,
+                "segmentation": [[1, 1, 10, 1, 10, 8, 1, 8]],
+                "score": 0.42,
+            }
+        ],
+    )
+    assert coco["annotations"][0]["score"] == 0.42

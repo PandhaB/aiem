@@ -4,7 +4,7 @@ import json
 import pytest
 from PIL import Image
 
-from core.jobs import JobRunner, _backend_options_for_checkpoint
+from core.jobs import JobRunner, _backend_options_for_checkpoint, _model_for_checkpoint
 from core.projects import ProjectStore
 
 
@@ -149,6 +149,55 @@ def test_publish_checkpoint_copies_vitdet_backend_sidecar(tmp_path: Path) -> Non
     assert _backend_options_for_checkpoint(published) == {"min_size": 256}
 
 
+def test_checkpoint_model_card_wins_over_project_default(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("Canvas Free", ["Loop-A"], engine="detectron2")
+    assert record.model == "mask_rcnn_r50_fpn"
+    run_id = "train-20260916T100000-vitdet"
+    output = record.runs_dir / run_id / "output"
+    output.mkdir(parents=True)
+    checkpoint = output / "model_0100.pth"
+    checkpoint.write_bytes(b"weights")
+    (output / "backend.json").write_text(
+        json.dumps({"model": "mask_rcnn_vitdet_b", "family": "vitdet", "input_size": 256}),
+        encoding="utf-8",
+    )
+    (record.runs_dir / run_id / "status.json").write_text(
+        json.dumps({"id": run_id, "kind": "train", "status": "completed", "model": "mask_rcnn_vitdet_b"}),
+        encoding="utf-8",
+    )
+    assert _model_for_checkpoint(record, checkpoint, f"{run_id}/model_0100.pth") == "mask_rcnn_vitdet_b"
+    assert _backend_options_for_checkpoint(checkpoint) == {"min_size": 256}
+
+
+def test_checkpoint_vitdet_family_without_model_id(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("Legacy Sidecar", ["Loop-A"], engine="detectron2")
+    checkpoint = record.weights_dir / "model_0008.pth"
+    checkpoint.write_bytes(b"weights")
+    checkpoint.with_name("model_0008.backend.json").write_text(
+        json.dumps({"family": "vitdet", "input_size": 256}),
+        encoding="utf-8",
+    )
+    assert _model_for_checkpoint(record, checkpoint, "model_0008.pth") == "mask_rcnn_vitdet_b"
+
+
+def test_checkpoint_model_from_run_metrics_when_sidecar_omits_card(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    record = store.create("YOLO Card From Run", ["Loop-A"], engine="ultralytics")
+    run_id = "train-20260916T110000-yolo"
+    output = record.runs_dir / run_id / "output"
+    output.mkdir(parents=True)
+    checkpoint = output / "model_0050.pt"
+    checkpoint.write_bytes(b"weights")
+    (output / "metrics.json").write_text(json.dumps({"model": "yolo26x-seg"}), encoding="utf-8")
+    (record.runs_dir / run_id / "status.json").write_text(
+        json.dumps({"id": run_id, "kind": "train", "status": "completed"}),
+        encoding="utf-8",
+    )
+    assert _model_for_checkpoint(record, checkpoint, f"{run_id}/model_0050.pt") == "yolo26x-seg"
+
+
 def test_resolve_checkpoint_loads_weights_from_training_run(tmp_path: Path) -> None:
     store = ProjectStore(tmp_path / "projects")
     runner = JobRunner(store, tmp_path / "weights")
@@ -165,3 +214,26 @@ def test_resolve_checkpoint_loads_weights_from_training_run(tmp_path: Path) -> N
     path = runner._resolve_checkpoint(record, f"{run_id}/model_0100.pt", "ultralytics")
     assert path.resolve() == (output / "model_0100.pt").resolve()
     assert path.read_bytes() == b"from-run"
+
+
+def test_backend_options_keep_native_zero_and_anchors(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model_1000.pth"
+    checkpoint.write_bytes(b"weights")
+    checkpoint.with_name("model_1000.backend.json").write_text(
+        json.dumps(
+            {
+                "model": "mask_rcnn_x101_fpn",
+                "family": "mask_rcnn",
+                "min_size": 0,
+                "min_size_test": 0,
+                "anchor_sizes": [8, 16, 32, 64, 128, 256],
+                "rpn_post_nms_topk_test": 2000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    options = _backend_options_for_checkpoint(checkpoint)
+    assert options["min_size"] == 0
+    assert options["min_size_test"] == 0
+    assert options["anchor_sizes"] == [8, 16, 32, 64, 128, 256]
+    assert options["rpn_post_nms_topk_test"] == 2000

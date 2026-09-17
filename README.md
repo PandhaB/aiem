@@ -64,6 +64,12 @@ docker compose -f Docker/docker-compose.yml down    # stop and remove the contai
 
 ## Layout
 
+Developer maps of the code (in French):
+
+- [How the repository is structured](docs/structure.md)
+- [How to add an engine or a model card](docs/nouvelles-implementations.md)
+- [Web UI (HTML / CSS / JS)](docs/ui.md)
+
 | Path             | Role                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `app/`           | Web server (FastAPI) and HTML/JS pages                                               |

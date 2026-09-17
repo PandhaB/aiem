@@ -1,3 +1,10 @@
+"""Curated model cards and public-weight download.
+
+A *card* (``mask_rcnn_r50_fpn``, ``yolov8s-seg``, …) belongs to one *engine*.
+Adding another Mask R-CNN YAML is a new card here; adding SMP is a new engine
+in :mod:`engine.registry`. See ``docs/nouvelles-implementations.md``.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,7 +36,11 @@ CHECKPOINT_SUFFIXES = {
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Backend-agnostic model id. Detectron2 config paths stay inside this catalogue."""
+    """One architecture the UI can pick. Detectron2 YAML/LazyConfig paths stay here.
+
+    ``family`` groups cards for UI notes (mask_rcnn vs vitdet vs yolo). ``task`` is
+    ``instance`` in v1; do not overload this with semantic segmentation yet.
+    """
 
     id: str
     label: str
@@ -39,11 +50,12 @@ class ModelSpec:
     detectron2_config: str = ""
     checkpoint_url: str = ""
     checkpoint_filename: str = ""
-    config_kind: str = "yaml"
+    config_kind: str = "yaml"  # "yaml" (get_cfg) or "lazy" (ViTDet)
     default_lr: float | None = None
     ultralytics_name: str = ""
 
 
+# Curated cards shown in the train UI. Order is display order.
 MODELS: dict[str, ModelSpec] = {
     "mask_rcnn_r50_fpn": ModelSpec(
         id="mask_rcnn_r50_fpn",
@@ -161,6 +173,7 @@ MODELS: dict[str, ModelSpec] = {
 
 
 def list_models(engine: str | None = None, task: str | None = None) -> list[ModelSpec]:
+    """Cards for one engine and/or task. The UI asks for ``task="instance"``."""
     items = list(MODELS.values())
     if engine:
         items = [item for item in items if item.engine == engine]

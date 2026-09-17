@@ -1,0 +1,79 @@
+{# Instance-segmentation list. Create uses fetch() so we can show an error without a full page reload. #}
+{% extends "base.html" %}
+{% block title %}Instance segmentation projects{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Instance segmentation projects</h1>
+  <p>Create a project, import TEM images, draw polygons, then train and run instance segmentation.</p>
+  {# {% if %} is Jinja: include the GPU warning only when the backend set device.message. #}
+  <p class="muted">Compute device: {{ device.device }}{% if device.message %} — {{ device.message }}{% endif %}</p>
+</section>
+
+<section class="grid-2">
+  <article class="card">
+    <h2>New project</h2>
+    {# A real <form> gives Enter-to-submit. JS intercepts submit and talks to /api instead of a classic POST. #}
+    <form id="create-form" class="stack">
+      {# Wrapping the input in <label> makes the text clickable and accessible. required blocks empty submit. #}
+      <label>Name
+        <input type="text" name="name" required placeholder="Dislocation loops">
+      </label>
+      <label>Classes (comma-separated)
+        <input type="text" name="classes" required placeholder="Loop-A, Loop-B, Loop-C">
+      </label>
+      <label>Engine
+        {# value= is what the API receives; the text is only what the user sees. #}
+        <select name="engine">
+          <option value="detectron2" selected>Detectron2</option>
+          <option value="ultralytics">Ultralytics YOLO</option>
+          <option value="stub">Stub (fake engine, no neural net)</option>
+        </select>
+      </label>
+      <button type="submit">Create project</button>
+      <p id="create-error" class="error" hidden></p>
+    </form>
+  </article>
+  <article class="card">
+    <h2>Existing projects</h2>
+    {% if projects %}
+    <ul class="project-list">
+      {# for: one <li> per project. Filters (map, join) turn the class list into "Loop-A, Loop-B". #}
+      {% for project in projects %}
+      <li>
+        <a href="/projects/{{ project.id }}">{{ project.name }}</a>
+        <span class="muted">{{ project.engine }} · {{ project.classes | map(attribute='name') | join(', ') }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">No projects yet.</p>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  // submit: user clicked Create (or pressed Enter). preventDefault stops a normal form navigation.
+  document.getElementById("create-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const error = document.getElementById("create-error");
+    const classes = form.classes.value.split(",").map((item) => item.trim()).filter(Boolean);
+    const body = { name: form.name.value, classes, engine: form.engine.value };
+    // fetch: HTTP from JS without reloading. POST + JSON is the API contract in app/routers/api.py.
+    const response = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      error.hidden = false;
+      error.textContent = payload.detail || "Could not create the project.";
+      return;
+    }
+    // Same origin: go to the new project page (id is a slug from the name).
+    window.location.href = "/projects/" + payload.id;
+  });
+</script>
+{% endblock %}

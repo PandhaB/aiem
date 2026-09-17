@@ -7,7 +7,7 @@ import shutil
 import time
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from engine.catalog import (
     DEFAULT_MODEL,
@@ -15,6 +15,8 @@ from engine.catalog import (
     get_model,
     reject_incompatible_checkpoint,
 )
+from engine.export import PREDICTIONS_NAME, export_instance_visuals, filter_coco_instances
+from engine.infer_size import native_capped_size
 from engine.types import (
     ExportRequest,
     InferRequest,
@@ -32,10 +34,13 @@ from engine.training import (
 )
 
 CHECKPOINT_SUFFIX = ".pth"
-PREDICTIONS_NAME = "predictions.json"
 VITDET_PATCH = 16
 VITDET_DEFAULT_CANVAS = 1024
 BACKEND_META_NAME = "backend.json"
+# Detectron2 ResizeShortestEdge treats 0 as a no-op (native pixels). A huge max
+# size is only consulted when min size is not 0.
+NATIVE_MAX_SIZE = 99999
+_SIDECAR_META_KEYS = {"model", "family", "input_size", "img_size", "square_pad"}
 
 
 def vitdet_canvas_size(
@@ -63,7 +68,11 @@ def _round_up_to_patch(value: int) -> int:
 
 
 class Detectron2Engine:
-    """First real backend: Mask R-CNN via Detectron2. UI must not import this module."""
+    """First real backend: Mask R-CNN (YAML zoo) and ViTDet (LazyConfig).
+
+    The UI must not import this module. YAML cards share one code path; ViTDet
+    uses ``config_kind="lazy"`` and a native-size canvas capped at 1024 px.
+    """
 
     def name(self) -> str:
         return "detectron2"
@@ -135,6 +144,10 @@ class Detectron2Engine:
                     should_stop=request.should_stop,
                     checkpoint_period=request.checkpoint_period,
                     start_iter=request.start_iter,
+                )
+                _write_backend_meta(
+                    request.output_dir,
+                    _backend_meta_payload(spec, request.backend_options),
                 )
             log_handler = _install_log_handler(on_progress)
             trainer.resume_or_load(resume=False)
@@ -220,12 +233,27 @@ class Detectron2Engine:
         image_paths = _list_images(request.images_dir)
         if not image_paths:
             raise FileNotFoundError(f"No images found in {request.images_dir}")
+        score_threshold = (
+            0.5 if request.score_threshold is None else float(request.score_threshold)
+        )
+        max_detections = (
+            100 if request.max_detections is None else int(request.max_detections)
+        )
 
         if spec.config_kind == "lazy":
-            canvas = vitdet_canvas_size(
-                (request.backend_options or {}).get("min_size"),
-                _image_hw(request.images_dir),
-            )
+            image_sizes = _image_hw(request.images_dir)
+            if request.max_image_dimension:
+                canvas = native_capped_size(
+                    image_sizes,
+                    request.max_image_dimension,
+                    step=VITDET_PATCH,
+                    min_value=VITDET_PATCH,
+                )
+            else:
+                canvas = vitdet_canvas_size(
+                    (request.backend_options or {}).get("min_size"),
+                    image_sizes,
+                )
             self._report(
                 on_progress,
                 0.06,
@@ -238,6 +266,8 @@ class Detectron2Engine:
                 checkpoint_path=request.checkpoint_path,
                 torch=_torch(),
                 canvas=canvas,
+                score_threshold=score_threshold,
+                max_detections=max_detections,
             )
         else:
             cfg = _build_infer_cfg(
@@ -246,7 +276,29 @@ class Detectron2Engine:
                 spec.detectron2_config,
                 n_classes=len(request.class_names),
                 checkpoint_path=request.checkpoint_path,
+                score_threshold=score_threshold,
+                max_detections=max_detections,
             )
+            infer_options = dict(request.backend_options or {})
+            if request.max_image_dimension:
+                size = native_capped_size(
+                    _image_hw(request.images_dir),
+                    request.max_image_dimension,
+                    step=1,
+                    min_value=1,
+                )
+                infer_options["min_size_test"] = size
+                infer_options["max_size_test"] = max(size * 2, size)
+            _apply_mask_rcnn_options(cfg, infer_options, stage="infer")
+            _ensure_rpn_topk_for_detections(cfg, max_detections)
+            resize_note = _mask_rcnn_resize_note(cfg)
+            if resize_note:
+                self._report(
+                    on_progress,
+                    0.06,
+                    f"Mask R-CNN input size: {resize_note}",
+                    log_line=f"Mask R-CNN input size: {resize_note}",
+                )
             predictor = detectron2.engine.DefaultPredictor(cfg)
         request.output_dir.mkdir(parents=True, exist_ok=True)
         coco = {
@@ -301,6 +353,7 @@ class Detectron2Engine:
                 f"Predicted {image_path.name}",
             )
 
+        filter_coco_instances(coco, request.score_threshold, request.max_detections)
         coco_path = request.output_dir / PREDICTIONS_NAME
         coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
         result = self.export_predictions(
@@ -311,6 +364,7 @@ class Detectron2Engine:
                 output_dir=request.output_dir,
                 class_names=request.class_names,
                 should_stop=request.should_stop,
+                smooth_tolerance=request.smooth_tolerance,
             ),
             on_progress=on_progress,
         )
@@ -322,63 +376,7 @@ class Detectron2Engine:
         request: ExportRequest,
         on_progress: ProgressCallback | None = None,
     ) -> InferResult:
-        if not request.predictions_coco_path.is_file():
-            raise FileNotFoundError(f"Predictions file not found: {request.predictions_coco_path}")
-        coco = json.loads(request.predictions_coco_path.read_text(encoding="utf-8"))
-        overlay_dir = request.output_dir / "overlays"
-        masks_dir = request.output_dir / "masks"
-        overlay_dir.mkdir(parents=True, exist_ok=True)
-        masks_dir.mkdir(parents=True, exist_ok=True)
-        categories = {item["id"]: item["name"] for item in coco.get("categories", [])}
-        anns_by_image: dict[int, list[dict]] = {}
-        for annotation in coco.get("annotations", []):
-            anns_by_image.setdefault(annotation["image_id"], []).append(annotation)
-
-        stopped = False
-        images = coco.get("images", [])
-        for index, image_info in enumerate(images):
-            if request.should_stop is not None and request.should_stop():
-                stopped = True
-                break
-            image_path = request.images_dir / image_info["file_name"]
-            if not image_path.is_file():
-                raise FileNotFoundError(f"Image not found: {image_path}")
-            image = Image.open(image_path).convert("RGBA")
-            overlay = image.copy()
-            draw = ImageDraw.Draw(overlay, "RGBA")
-            annotations = anns_by_image.get(image_info["id"], [])
-            for instance_index, annotation in enumerate(annotations, start=1):
-                class_name = categories.get(annotation["category_id"], "unknown")
-                color = _parse_hex(request.overlay_colors.get(class_name, "#e63946"))
-                polygon = _flat_to_pairs(annotation["segmentation"][0])
-                draw.polygon(polygon, fill=(*color, 96), outline=(*color, 255))
-                mask = Image.new("L", image.size, 0)
-                ImageDraw.Draw(mask).polygon(polygon, fill=255)
-                stem = Path(image_info["file_name"]).stem
-                mask.save(masks_dir / f"{stem}_{instance_index:03d}.png")
-            Image.alpha_composite(image, overlay).convert("RGB").save(
-                overlay_dir / image_info["file_name"]
-            )
-            if images:
-                self._report(
-                    on_progress,
-                    0.6 + 0.4 * ((index + 1) / len(images)),
-                    f"Exported {image_info['file_name']}",
-                )
-
-        coco_path = request.output_dir / PREDICTIONS_NAME
-        if request.predictions_coco_path.resolve() != coco_path.resolve():
-            coco_path.write_text(json.dumps(coco, indent=2), encoding="utf-8")
-        if stopped:
-            self._report(on_progress, 1.0, "Inference stopped")
-        else:
-            self._report(on_progress, 1.0, "Export complete")
-        return InferResult(
-            coco_path=coco_path,
-            overlay_dir=overlay_dir,
-            masks_dir=masks_dir,
-            stopped=stopped,
-        )
+        return export_instance_visuals(request, on_progress)
 
     @staticmethod
     def _report(on_progress: ProgressCallback | None, value: float, message: str, **extra) -> None:
@@ -462,6 +460,7 @@ def _build_lazy_trainer(torch, spec, dataset_name: str, n_classes: int, request:
     _write_backend_meta(
         request.output_dir,
         {
+            "model": spec.id,
             "family": spec.family,
             "input_size": canvas,
             "img_size": VITDET_DEFAULT_CANVAS,
@@ -529,7 +528,16 @@ class _LazyProgressTrainer:
 class _LazyPredictor:
     """Single-image inference for LazyConfig models (ViTDet). DefaultPredictor is YAML-only."""
 
-    def __init__(self, spec, n_classes: int, checkpoint_path: Path, torch, canvas: int = VITDET_DEFAULT_CANVAS) -> None:
+    def __init__(
+        self,
+        spec,
+        n_classes: int,
+        checkpoint_path: Path,
+        torch,
+        canvas: int = VITDET_DEFAULT_CANVAS,
+        score_threshold: float = 0.5,
+        max_detections: int = 100,
+    ) -> None:
         from detectron2 import model_zoo
         from detectron2.checkpoint import DetectionCheckpointer
         from detectron2.config import instantiate
@@ -545,7 +553,9 @@ class _LazyPredictor:
         DetectionCheckpointer(model).load(str(checkpoint_path))
         box_predictor = getattr(model.roi_heads, "box_predictor", None)
         if box_predictor is not None and hasattr(box_predictor, "test_score_thresh"):
-            box_predictor.test_score_thresh = 0.5
+            box_predictor.test_score_thresh = score_threshold
+        if box_predictor is not None and hasattr(box_predictor, "test_topk_per_image"):
+            box_predictor.test_topk_per_image = max_detections
         self.model = model
         self.torch = torch
         self.aug = T.ResizeShortestEdge(short_edge_length=canvas, max_size=canvas)
@@ -612,7 +622,9 @@ def _build_train_cfg(
     return cfg
 
 
-def _apply_mask_rcnn_options(cfg, options: dict) -> None:
+def _apply_mask_rcnn_options(cfg, options: dict | None, *, stage: str = "train") -> None:
+    """Apply Mask R-CNN YAML knobs. ``min_size`` 0 means native pixels (no resize)."""
+    options = options or {}
     sizes = options.get("anchor_sizes")
     if sizes:
         values = [int(item) for item in sizes]
@@ -620,21 +632,91 @@ def _apply_mask_rcnn_options(cfg, options: dict) -> None:
     ratios = options.get("anchor_aspect_ratios")
     if ratios:
         cfg.MODEL.ANCHOR_GENERATOR.ASPECT_RATIOS = [[float(item) for item in ratios]]
-    min_size = options.get("min_size")
-    if min_size:
-        size = int(min_size)
-        cfg.INPUT.MIN_SIZE_TRAIN = (size,)
-        cfg.INPUT.MIN_SIZE_TEST = size
-        cfg.INPUT.MAX_SIZE_TRAIN = max(int(cfg.INPUT.MAX_SIZE_TRAIN), size * 2)
-        cfg.INPUT.MAX_SIZE_TEST = max(int(cfg.INPUT.MAX_SIZE_TEST), size * 2)
+    post_nms = options.get("rpn_post_nms_topk_test")
+    if post_nms is not None:
+        value = int(post_nms)
+        cfg.MODEL.RPN.POST_NMS_TOPK_TEST = value
+        if int(cfg.MODEL.RPN.PRE_NMS_TOPK_TEST) < value:
+            cfg.MODEL.RPN.PRE_NMS_TOPK_TEST = value
+
+    min_size_train = options.get("min_size")
+    max_size_train = options.get("max_size")
+    min_size_test = options.get("min_size_test")
+    max_size_test = options.get("max_size_test")
+    if min_size_test is None:
+        min_size_test = min_size_train
+    if max_size_test is None:
+        max_size_test = max_size_train
+
+    if stage == "train":
+        _set_resize(cfg, min_size_train, max_size_train, train=True)
+        _set_resize(cfg, min_size_test, max_size_test, train=False)
+    else:
+        _set_resize(cfg, min_size_test, max_size_test, train=False)
 
 
-def _build_infer_cfg(detectron2, torch, config_name: str, n_classes: int, checkpoint_path: Path):
+def _set_resize(cfg, min_size, max_size, *, train: bool) -> None:
+    if min_size is None and max_size is None:
+        return
+    shortest = None if min_size is None else int(min_size)
+    longest = None if max_size is None else int(max_size)
+    if longest is None and shortest is not None:
+        if shortest == 0:
+            longest = NATIVE_MAX_SIZE
+        else:
+            current = int(cfg.INPUT.MAX_SIZE_TRAIN if train else cfg.INPUT.MAX_SIZE_TEST)
+            longest = max(current, shortest * 2)
+    if train:
+        if shortest is not None:
+            cfg.INPUT.MIN_SIZE_TRAIN = (shortest,)
+        if longest is not None:
+            cfg.INPUT.MAX_SIZE_TRAIN = longest
+    else:
+        if shortest is not None:
+            cfg.INPUT.MIN_SIZE_TEST = shortest
+        if longest is not None:
+            cfg.INPUT.MAX_SIZE_TEST = longest
+
+
+def _ensure_rpn_topk_for_detections(cfg, max_detections: int) -> None:
+    if int(cfg.MODEL.RPN.PRE_NMS_TOPK_TEST) < max_detections:
+        cfg.MODEL.RPN.PRE_NMS_TOPK_TEST = max_detections
+    if int(cfg.MODEL.RPN.POST_NMS_TOPK_TEST) < max_detections:
+        cfg.MODEL.RPN.POST_NMS_TOPK_TEST = max_detections
+
+
+def _mask_rcnn_resize_note(cfg) -> str | None:
+    shortest = int(cfg.INPUT.MIN_SIZE_TEST)
+    if shortest == 0:
+        return "native pixels (no resize)"
+    return f"{shortest} px"
+
+
+def _backend_meta_payload(spec, backend_options: dict | None) -> dict:
+    payload = {"model": spec.id, "family": spec.family}
+    for key, value in (backend_options or {}).items():
+        if key in _SIDECAR_META_KEYS or value is None:
+            continue
+        payload[key] = value
+    return payload
+
+
+def _build_infer_cfg(
+    detectron2,
+    torch,
+    config_name: str,
+    n_classes: int,
+    checkpoint_path: Path,
+    score_threshold: float = 0.5,
+    max_detections: int = 100,
+):
     cfg = detectron2.get_cfg()
     cfg.merge_from_file(detectron2.model_zoo.get_config_file(config_name))
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = n_classes
     cfg.MODEL.WEIGHTS = str(checkpoint_path)
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_threshold
+    cfg.TEST.DETECTIONS_PER_IMAGE = max_detections
+    _ensure_rpn_topk_for_detections(cfg, max_detections)
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.DATALOADER.NUM_WORKERS = 0
     return cfg
@@ -881,14 +963,3 @@ def _mask_to_polygon(mask) -> list[float] | None:
     if len(contour) < 3:
         return None
     return [float(v) for v in contour.flatten().tolist()]
-
-
-def _flat_to_pairs(flat: list[float]) -> list[tuple[float, float]]:
-    return [(flat[index], flat[index + 1]) for index in range(0, len(flat), 2)]
-
-
-def _parse_hex(value: str) -> tuple[int, int, int]:
-    text = value.strip().lstrip("#")
-    if len(text) != 6:
-        return (230, 57, 70)
-    return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))

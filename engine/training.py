@@ -1,3 +1,5 @@
+"""Helpers shared by every training backend: checkpoint names, ETA, stop signal."""
+
 from __future__ import annotations
 
 from pathlib import Path
